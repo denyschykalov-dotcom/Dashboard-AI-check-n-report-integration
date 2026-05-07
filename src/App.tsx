@@ -3707,11 +3707,9 @@ export default function App() {
                         </>
                       ) : (
                         <>
-                          {!isAdmin ? (
-                            <button className="ghost-btn" type="button" onClick={startHistoryInputMode}>
-                              add to inputs
-                            </button>
-                          ) : null}
+                          <button className="ghost-btn" type="button" onClick={startHistoryInputMode}>
+                            add to inputs
+                          </button>
                           <button className="ghost-btn" type="button" onClick={startHistoryForwardMode}>
                             forward to another user
                           </button>
