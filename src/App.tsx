@@ -1603,6 +1603,7 @@ export default function App() {
   const overviewCaptureRef = useRef<HTMLDivElement | null>(null);
   const overviewLoadRequestIdRef = useRef(0);
   const csvFileInputRef = useRef<HTMLInputElement | null>(null);
+  const lastHistorySelectedRunIdRef = useRef<string | null>(null);
   const lastSavedDraftRef = useRef(JSON.stringify([emptyDraft]));
   const serviceRowsDirtyRef = useRef(false);
   const serviceRowsRef = useRef(serviceRows);
@@ -2185,6 +2186,7 @@ export default function App() {
     setIsHistoryForwardMode(true);
     setIsHistoryInputMode(false);
     setSelectedHistoryRunIds([]);
+    lastHistorySelectedRunIdRef.current = null;
     setStatusMessage("");
   }
 
@@ -2192,6 +2194,7 @@ export default function App() {
     setIsHistoryForwardMode(false);
     setIsHistoryInputMode(false);
     setSelectedHistoryRunIds([]);
+    lastHistorySelectedRunIdRef.current = null;
     setHistoryForwardDialog(null);
   }
 
@@ -2200,15 +2203,43 @@ export default function App() {
     setIsHistoryForwardMode(false);
     setHistoryForwardDialog(null);
     setSelectedHistoryRunIds([]);
+    lastHistorySelectedRunIdRef.current = null;
     setStatusMessage("");
   }
 
-  function toggleHistoryRunSelection(runId: string) {
-    setSelectedHistoryRunIds((current) => (
-      current.includes(runId)
-        ? current.filter((item) => item !== runId)
-        : [...current, runId]
-    ));
+  function toggleHistoryRunSelection(runId: string, shiftKey = false, checked?: boolean) {
+    const visibleRunIds = historyData.items.map((item) => item.run_id);
+    const lastRunId = lastHistorySelectedRunIdRef.current;
+    const canSelectRange = Boolean(
+      shiftKey
+      && lastRunId
+      && visibleRunIds.includes(lastRunId)
+      && visibleRunIds.includes(runId),
+    );
+
+    setSelectedHistoryRunIds((current) => {
+      if (!canSelectRange || !lastRunId) {
+        return current.includes(runId)
+          ? current.filter((item) => item !== runId)
+          : [...current, runId];
+      }
+
+      const startIndex = visibleRunIds.indexOf(lastRunId);
+      const endIndex = visibleRunIds.indexOf(runId);
+      const [fromIndex, toIndex] = startIndex < endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
+      const rangeRunIds = visibleRunIds.slice(fromIndex, toIndex + 1);
+      const shouldSelectRange = checked ?? !current.includes(runId);
+      const nextSelected = new Set(current);
+      rangeRunIds.forEach((rangeRunId) => {
+        if (shouldSelectRange) {
+          nextSelected.add(rangeRunId);
+        } else {
+          nextSelected.delete(rangeRunId);
+        }
+      });
+      return visibleRunIds.filter((visibleRunId) => nextSelected.has(visibleRunId));
+    });
+    lastHistorySelectedRunIdRef.current = runId;
   }
 
   async function openHistoryForwardDialog() {
@@ -2262,6 +2293,7 @@ export default function App() {
       setIsHistoryForwardMode(false);
       setIsHistoryInputMode(false);
       setSelectedHistoryRunIds([]);
+      lastHistorySelectedRunIdRef.current = null;
       await Promise.all([loadHistory(sessionToken), loadOverview(sessionToken)]);
       setStatusMessage(
         `${response.total_runs} history row${response.total_runs === 1 ? "" : "s"} forwarded to ${targetUser?.username || "selected user"}.`,
@@ -2303,6 +2335,7 @@ export default function App() {
     });
     setIsHistoryInputMode(false);
     setSelectedHistoryRunIds([]);
+    lastHistorySelectedRunIdRef.current = null;
     setPage("service");
     setStatusMessage(`${rowsToAdd.length} row${rowsToAdd.length === 1 ? "" : "s"} added to inputs.`);
   }
@@ -3732,7 +3765,15 @@ export default function App() {
                             <div className="history-card-title-row">
                               {isHistorySelectionMode ? (
                                 <label className="history-select-box" aria-label={`Select ${item.keyword}`}>
-                                  <input type="checkbox" checked={isSelectedForAction} onChange={() => toggleHistoryRunSelection(item.run_id)} />
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelectedForAction}
+                                    onChange={(event) => toggleHistoryRunSelection(
+                                      item.run_id,
+                                      (event.nativeEvent as MouseEvent).shiftKey,
+                                      event.currentTarget.checked,
+                                    )}
+                                  />
                                 </label>
                               ) : null}
                               <strong>{formatDateTime(item.created_at)}</strong>
