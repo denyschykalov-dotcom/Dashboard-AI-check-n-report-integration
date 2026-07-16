@@ -1925,3 +1925,120 @@ th {
     grid-template-columns: 1fr;
   }
 }
+
+
+/* --- Report Builder ------------------------------------------------------- */
+
+.report-builder-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.report-builder-page .panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.report-create-client {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+}
+
+.report-block-group {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.report-block-group h4 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.report-block-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+}
+
+.report-block-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.report-hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+.report-preview-block {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.report-preview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.report-ok {
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.report-unavailable {
+  color: #a06000;
+  background: #fff6e5;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.report-data {
+  background: rgba(46, 25, 99, 0.06);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 260px;
+}
+
+.report-saved-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.report-saved-table th,
+.report-saved-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.report-saved-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}

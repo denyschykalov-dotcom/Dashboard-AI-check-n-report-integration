@@ -1,9 +1,10 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
 
 import { apiRequest } from "./api";
+import ReportBuilderPage from "./reportBuilder/ReportBuilderPage";
 import { hasSupabaseConfig, initialAuthRedirectHref, supabase } from "./supabase";
 
-type Page = "overview" | "service" | "outputs" | "history";
+type Page = "overview" | "service" | "outputs" | "history" | "reportBuilder";
 
 type DraftForm = {
   keyword: string;
@@ -761,6 +762,7 @@ const navItems: Array<{ key: Page; label: string }> = [
   { key: "overview", label: "Overview" },
   { key: "service", label: "AI Visibility Input" },
   { key: "outputs", label: "AI Visibility Outputs" },
+  { key: "reportBuilder", label: "Report Builder" },
   { key: "history", label: "History" },
 ];
 
@@ -3700,6 +3702,8 @@ export default function App() {
               ) : null}
             </section>
           )}
+
+          {page === "reportBuilder" && <ReportBuilderPage token={sessionToken} />}
 
           {page === "history" && (
             <section className="page active">

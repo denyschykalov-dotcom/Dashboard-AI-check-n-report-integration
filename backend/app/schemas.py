@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import typing
+
 import uuid
 
 from pydantic import BaseModel, Field
@@ -55,3 +57,35 @@ class HistoryForwardResponse(BaseModel):
     outputs_updated: int = 0
     results_updated: int = 0
     target_user_id: str
+
+
+# --- Report Builder ----------------------------------------------------------
+
+
+class ClientCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    domain: str = Field(min_length=1, max_length=200)
+
+
+class GenerateReportRequest(BaseModel):
+    client_id: uuid.UUID
+    block_keys: list[str] = Field(default_factory=list)
+
+
+class ReportBlockPayload(BaseModel):
+    block_type_key: str
+    status: str = "ok"
+    data: typing.Optional[dict] = None
+    comment: str = ""
+    unavailable_reason: typing.Optional[str] = None
+
+
+class ReportSaveRequest(BaseModel):
+    client_id: uuid.UUID
+    period_label: str = ""
+    blocks: list[ReportBlockPayload] = Field(default_factory=list)
+
+
+class ReportUpdateRequest(BaseModel):
+    period_label: typing.Optional[str] = None
+    blocks: list[ReportBlockPayload] = Field(default_factory=list)

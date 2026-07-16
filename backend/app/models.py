@@ -95,6 +95,59 @@ class Output(Base):
     )
 
 
+class Client(Base):
+    __tablename__ = "Dashboard_ReportBuilder_clients"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    domain: Mapped[str] = mapped_column(Text, nullable=False)
+    ga4_sheet_id: Mapped[typing.Optional[str]] = mapped_column(Text)
+    clickup_list_id: Mapped[typing.Optional[str]] = mapped_column(Text)
+    se_ranking_target: Mapped[typing.Optional[str]] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+
+
+class Report(Base):
+    __tablename__ = "Dashboard_ReportBuilder_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    client_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    period_label: Mapped[str] = mapped_column(Text, nullable=False)
+    generated_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class ReportBlock(Base):
+    __tablename__ = "Dashboard_ReportBuilder_report_blocks"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    report_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    block_type_key: Mapped[str] = mapped_column(Text, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    data_json: Mapped[typing.Optional[str]] = mapped_column(Text)
+    comment: Mapped[typing.Optional[str]] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ok", server_default="ok")
+    unavailable_reason: Mapped[typing.Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+
+
 class RunResult(Base):
     __tablename__ = "Dashboard_AI_check_run_results"
 

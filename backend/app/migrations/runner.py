@@ -7,6 +7,10 @@ from sqlalchemy import text
 from backend.app.config import get_settings
 from backend.app.db import Base, build_engine
 
+# Import models so their classes register on Base.metadata before create_all()
+# runs on the non-Postgres fallback path below.
+import backend.app.models  # noqa: F401
+
 
 MIGRATIONS_TABLE = "backend_schema_migrations"
 

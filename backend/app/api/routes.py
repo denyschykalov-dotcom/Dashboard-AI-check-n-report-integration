@@ -7,19 +7,26 @@ import uuid
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from backend.app.auth import AuthenticatedUser, get_current_user
 from backend.app.db import SessionLocal, get_db_session
-from backend.app.models import Profile
+from backend.app.models import Client, Profile
+from backend.app.report_builder import export as report_export
+from backend.app.report_builder import service as report_service
 from backend.app.schemas import (
     BulkRunActionResponse,
+    ClientCreateRequest,
     DraftAppendPayload,
     DraftPayload,
+    GenerateReportRequest,
     HistoryForwardRequest,
     HistoryForwardResponse,
     ProfileUpsertRequest,
+    ReportSaveRequest,
+    ReportUpdateRequest,
     RunStartRequest,
 )
 from backend.app.service_container import get_run_service
@@ -490,4 +497,154 @@ def get_overview_summary(
         project=project,
         selected_user_id=user_id if current_user.is_admin else None,
         is_admin=current_user.is_admin,
+    )
+
+
+# --- Report Builder ----------------------------------------------------------
+
+
+@router.get("/report-builder/block-catalog")
+def get_block_catalog(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    return {"blocks": report_service.get_block_catalog()}
+
+
+@router.get("/report-builder/clients")
+def list_report_clients(
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    clients = report_service.list_clients(session)
+    return {"clients": [report_service.serialize_client(client) for client in clients]}
+
+
+@router.post("/report-builder/clients", status_code=201)
+def create_report_client(
+    payload: ClientCreateRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    try:
+        client = report_service.create_client(
+            session,
+            name=payload.name,
+            domain=payload.domain,
+            created_by=current_user.user_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return report_service.serialize_client(client)
+
+
+@router.post("/report-builder/generate")
+def generate_report(
+    payload: GenerateReportRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    try:
+        return report_service.generate(
+            session,
+            client_id=payload.client_id,
+            block_keys=payload.block_keys,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/report-builder/reports", status_code=201)
+def save_report(
+    payload: ReportSaveRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    try:
+        report = report_service.save_report(
+            session,
+            client_id=payload.client_id,
+            period_label=payload.period_label,
+            blocks=[block.model_dump() for block in payload.blocks],
+            generated_by=current_user.user_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return report_service.serialize_report_summary(report)
+
+
+@router.put("/report-builder/reports/{report_id}")
+def update_report(
+    report_id: uuid.UUID,
+    payload: ReportUpdateRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    try:
+        report = report_service.update_report(
+            session,
+            report_id=report_id,
+            period_label=payload.period_label,
+            blocks=[block.model_dump() for block in payload.blocks],
+            generated_by=current_user.user_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return report_service.serialize_report_summary(report)
+
+
+@router.get("/report-builder/clients/{client_id}/reports")
+def list_client_reports(
+    client_id: uuid.UUID,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    reports = report_service.list_reports_for_client(session, client_id)
+    return {"reports": [report_service.serialize_report_summary(report) for report in reports]}
+
+
+@router.get("/report-builder/reports/{report_id}")
+def get_report_detail(
+    report_id: uuid.UUID,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    try:
+        report, blocks = report_service.get_report(session, report_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return report_service.serialize_report_detail(report, blocks)
+
+
+@router.get("/report-builder/reports/{report_id}/export")
+def export_report(
+    report_id: uuid.UUID,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
+    try:
+        report, blocks = report_service.get_report(session, report_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    client = session.get(Client, report.client_id)
+    client_name = client.name if client else "Client"
+    client_domain = client.domain if client else ""
+    document = report_export.build_report_html(
+        report,
+        blocks,
+        client_name=client_name,
+        client_domain=client_domain,
+    )
+    safe_name = "".join(ch if ch.isalnum() else "-" for ch in client_name).strip("-") or "client"
+    filename = f"{safe_name}-{report.period_label}-report.html"
+    return Response(
+        content=document,
+        media_type="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
