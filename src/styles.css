@@ -2042,3 +2042,20 @@ th {
   gap: 8px;
   justify-content: flex-end;
 }
+
+
+.report-settings-panel .report-settings-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.report-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}

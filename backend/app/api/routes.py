@@ -16,8 +16,12 @@ from backend.app.db import SessionLocal, get_db_session
 from backend.app.models import Client, Profile
 from backend.app.report_builder import export as report_export
 from backend.app.report_builder import service as report_service
+from backend.app.report_builder import settings_service as report_settings_service
+from backend.app.report_builder.data_sources import clickup_client
+from backend.app.report_builder.data_sources.clickup_client import ClickUpAccessError
 from backend.app.schemas import (
     BulkRunActionResponse,
+    ClickUpTokenRequest,
     ClientCreateRequest,
     DraftAppendPayload,
     DraftPayload,
@@ -510,6 +514,44 @@ def get_block_catalog(
     return {"blocks": report_service.get_block_catalog()}
 
 
+@router.get("/report-builder/settings")
+def get_report_settings(
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    return report_settings_service.get_status(session, current_user.user_id)
+
+
+@router.put("/report-builder/settings/clickup")
+def set_clickup_token(
+    payload: ClickUpTokenRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    # Validate the token against ClickUp before storing, so the user gets
+    # immediate feedback instead of a silent failure at report time.
+    try:
+        user = clickup_client.verify_token(payload.token.strip())
+    except ClickUpAccessError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    try:
+        report_settings_service.set_clickup_token(session, current_user.user_id, payload.token)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    status = report_settings_service.get_status(session, current_user.user_id)
+    status["clickup_username"] = user.get("username")
+    return status
+
+
+@router.delete("/report-builder/settings/clickup")
+def clear_clickup_token(
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    report_settings_service.clear_clickup_token(session, current_user.user_id)
+    return report_settings_service.get_status(session, current_user.user_id)
+
+
 @router.get("/report-builder/clients")
 def list_report_clients(
     session: Session = Depends(get_db_session),
@@ -548,6 +590,7 @@ def generate_report(
             session,
             client_id=payload.client_id,
             block_keys=payload.block_keys,
+            user_id=current_user.user_id,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import typing
 
-from dataclasses import dataclass
+import uuid
+
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from backend.app.models import Client
@@ -40,3 +42,9 @@ class ResolveContext:
     # SQLAlchemy Session; typed loosely to avoid a hard import cycle in resolvers
     # that don't touch the database.
     session: typing.Any = None
+    # Shared per-generate-call cache so multiple blocks from the same external
+    # source (e.g. several GA4 sheet blocks) fetch that source only once.
+    cache: dict = field(default_factory=dict)
+    # The user generating the report — used for per-user credentials (e.g. that
+    # user's own ClickUp API token).
+    user_id: typing.Optional[uuid.UUID] = None

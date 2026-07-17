@@ -89,3 +89,7 @@ class ReportSaveRequest(BaseModel):
 class ReportUpdateRequest(BaseModel):
     period_label: typing.Optional[str] = None
     blocks: list[ReportBlockPayload] = Field(default_factory=list)
+
+
+class ClickUpTokenRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=200)

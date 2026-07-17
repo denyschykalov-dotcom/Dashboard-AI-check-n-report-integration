@@ -23,6 +23,10 @@ htmlcov/
 *.sqlite3
 *.log
 
+# Secrets at rest (auto-generated encryption key for stored API tokens)
+*.key
+backend/data/*.key
+
 # Environment files
 .env
 **/.env
@@ -50,3 +54,5 @@ Thumbs.db
 .idea/
 
 scripts/
+
+tarsco-seo-reports-3fa8ec0b2836.json

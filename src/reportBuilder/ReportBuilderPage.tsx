@@ -10,6 +10,7 @@ import type {
   GenerateReportResponse,
   ReportDetail,
   ReportListResponse,
+  ReportSettingsStatus,
   ReportSummary,
   ReportBlockType,
 } from "./types";
@@ -38,6 +39,11 @@ export default function ReportBuilderPage({ token }: Props) {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+
+  const [settings, setSettings] = useState<ReportSettingsStatus | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [clickupTokenInput, setClickupTokenInput] = useState("");
+  const [isSavingToken, setIsSavingToken] = useState(false);
 
   const displayNameByKey = useMemo(() => {
     const map: Record<string, string> = {};
@@ -90,6 +96,10 @@ export default function ReportBuilderPage({ token }: Props) {
         });
         setCatalog(response.blocks);
         await loadClients();
+        const settingsResponse = await apiRequest<ReportSettingsStatus>("/api/report-builder/settings", {
+          token,
+        });
+        setSettings(settingsResponse);
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Failed to load the report builder.");
       }
@@ -122,6 +132,46 @@ export default function ReportBuilderPage({ token }: Props) {
       }
       return next;
     });
+  }
+
+  async function handleSaveClickupToken() {
+    if (!token || !clickupTokenInput.trim()) return;
+    setError(null);
+    setStatus(null);
+    setIsSavingToken(true);
+    try {
+      const response = await apiRequest<ReportSettingsStatus>("/api/report-builder/settings/clickup", {
+        method: "PUT",
+        token,
+        body: { token: clickupTokenInput.trim() },
+      });
+      setSettings(response);
+      setClickupTokenInput("");
+      setStatus(
+        response.clickup_username
+          ? `ClickUp connected as ${response.clickup_username}.`
+          : "ClickUp API key saved.",
+      );
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Failed to save ClickUp API key.");
+    } finally {
+      setIsSavingToken(false);
+    }
+  }
+
+  async function handleClearClickupToken() {
+    if (!token) return;
+    setError(null);
+    try {
+      const response = await apiRequest<ReportSettingsStatus>("/api/report-builder/settings/clickup", {
+        method: "DELETE",
+        token,
+      });
+      setSettings(response);
+      setStatus("ClickUp API key removed.");
+    } catch (clearError) {
+      setError(clearError instanceof Error ? clearError.message : "Failed to remove ClickUp API key.");
+    }
   }
 
   async function handleCreateClient() {
@@ -280,6 +330,61 @@ export default function ReportBuilderPage({ token }: Props) {
     <section className="page active report-builder-page">
       {error ? <div className="status-banner">{error}</div> : null}
       {status ? <div className="status-banner">{status}</div> : null}
+
+      {/* Integrations / settings */}
+      <article className="panel report-settings-panel">
+        <div className="report-settings-head">
+          <div>
+            <p className="eyebrow">Integrations</p>
+            <h3>
+              ClickUp{" "}
+              {settings?.clickup_configured ? (
+                <span className="report-ok">✓ connected ({settings.clickup_token_hint})</span>
+              ) : (
+                <span className="report-unavailable">not connected</span>
+              )}
+            </h3>
+          </div>
+          <button className="ghost-btn" type="button" onClick={() => setShowSettings((v) => !v)}>
+            {showSettings ? "Hide" : "Manage"}
+          </button>
+        </div>
+        {showSettings ? (
+          <div className="report-settings-body">
+            <p className="report-hint">
+              Enter your personal ClickUp API token (ClickUp → Settings → Apps → API Token). It is stored
+              encrypted and used only to pull your workspace's task lists for the Work completed / Planned
+              works blocks, matched to each client by name.
+            </p>
+            <label className="field-stack">
+              <span>ClickUp API token</span>
+              <input
+                className="auth-input"
+                type="password"
+                autoComplete="off"
+                value={clickupTokenInput}
+                onChange={(event) => setClickupTokenInput(event.target.value)}
+                placeholder={settings?.clickup_configured ? "Enter a new token to replace" : "pk_..."}
+              />
+            </label>
+            <div className="modal-actions">
+              {settings?.clickup_configured ? (
+                <button className="ghost-btn" type="button" onClick={() => void handleClearClickupToken()}>
+                  Remove
+                </button>
+              ) : null}
+              <button
+                className="primary-btn"
+                type="button"
+                onClick={() => void handleSaveClickupToken()}
+                disabled={isSavingToken || !clickupTokenInput.trim()}
+              >
+                {isSavingToken ? "Verifying…" : "Save & verify"}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </article>
 
       {/* Step 1: client selection */}
       <article className="panel">

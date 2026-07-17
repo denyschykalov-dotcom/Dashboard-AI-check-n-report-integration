@@ -110,6 +110,24 @@ class Client(Base):
     )
 
 
+class UserSettings(Base):
+    __tablename__ = "Dashboard_ReportBuilder_user_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, unique=True)
+    clickup_token_encrypted: Mapped[typing.Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
 class Report(Base):
     __tablename__ = "Dashboard_ReportBuilder_reports"
 

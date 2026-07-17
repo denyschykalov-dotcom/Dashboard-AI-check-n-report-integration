@@ -56,3 +56,9 @@ export type ReportListResponse = {
 export type ReportDetail = ReportSummary & {
   blocks: GeneratedBlock[];
 };
+
+export type ReportSettingsStatus = {
+  clickup_configured: boolean;
+  clickup_token_hint: string | null;
+  clickup_username?: string | null;
+};

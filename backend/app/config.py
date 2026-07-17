@@ -64,6 +64,10 @@ class Settings:
     admin_email: str
     supabase_url: typing.Optional[str]
     supabase_anon_key: typing.Optional[str]
+    google_sheets_credentials_file: typing.Optional[str]
+    google_sheets_client_folder_id: typing.Optional[str]
+    ahrefs_api_token: typing.Optional[str]
+    report_builder_secret_key: typing.Optional[str]
     openai_api_key: typing.Optional[str]
     gemini_api_key: typing.Optional[str]
     grok_api_key: typing.Optional[str]
@@ -118,6 +122,11 @@ def get_settings() -> Settings:
         admin_email=admin_email,
         supabase_url=supabase_url,
         supabase_anon_key=supabase_anon_key,
+        google_sheets_credentials_file=_read_env("GOOGLE_SHEETS_CREDENTIALS_FILE"),
+        google_sheets_client_folder_id=_read_env("GOOGLE_SHEETS_CLIENT_FOLDER_ID"),
+        # Env var name preserves the existing project spelling ("ACHREVS_API").
+        ahrefs_api_token=_read_env("AHREFS_API_TOKEN") or _read_env("ACHREVS_API"),
+        report_builder_secret_key=_read_env("REPORT_BUILDER_SECRET_KEY"),
         openai_api_key=_read_env("OPENAI_API_KEY"),
         gemini_api_key=_read_env("GEMINI_API_KEY"),
         grok_api_key=_read_env("GROK_API_KEY") or _read_env("XAI_API_KEY"),

@@ -6,3 +6,7 @@ psycopg[binary]>=3.2.13,<3.3
 python-dotenv>=1.0
 sqlalchemy>=2.0
 uvicorn>=0.35
+
+# Report Builder: Google Sheets access (GA4/GSC blocks)
+google-auth>=2.0
+requests>=2.31

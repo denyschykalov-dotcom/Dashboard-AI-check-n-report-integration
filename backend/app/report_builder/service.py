@@ -87,13 +87,16 @@ def generate(
     *,
     client_id: uuid.UUID,
     block_keys: list[str],
+    user_id: typing.Optional[uuid.UUID] = None,
 ) -> dict[str, object]:
     if not block_keys:
         raise ValueError("Select at least one block before generating.")
     client = _get_client(session, client_id)
     now = utcnow()
     period_label = _default_period_label(now)
-    context = ResolveContext(client=client, period_label=period_label, now=now, session=session)
+    context = ResolveContext(
+        client=client, period_label=period_label, now=now, session=session, user_id=user_id
+    )
 
     blocks: list[dict[str, object]] = []
     for key in block_keys:
@@ -124,6 +127,15 @@ def generate(
                 "unavailable_reason": result.unavailable_reason,
             }
         )
+        if (
+            result.status == "ok"
+            and result.data
+            and period_label == _default_period_label(now)
+            and result.data.get("period")
+        ):
+            # Prefer the sheet's own reporting period (e.g. "Jun 2026") over the
+            # wall-clock default once a source that actually has one resolves.
+            period_label = str(result.data["period"])
 
     unavailable = sum(1 for block in blocks if block["status"] == "unavailable")
     logger.info(
