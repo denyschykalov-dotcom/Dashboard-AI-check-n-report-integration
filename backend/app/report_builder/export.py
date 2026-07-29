@@ -27,8 +27,10 @@ from backend.app.models import Report, ReportBlock
 
 _TEMPLATE_PATH = Path(__file__).resolve().parent / "report_template.html"
 
-# block_type_key -> template section id
-_SECTION_BY_KEY = {
+# block_type_key -> template section id. Public: a block only has somewhere to
+# show a comment if it appears here (ai_commentary reads this to decide which
+# sections get a generated comment).
+SECTION_BY_KEY = {
     "intro_header": "b1",
     "search_industry": "b2",
     "ahrefs_domain_analysis": "b3",
@@ -453,6 +455,21 @@ def _build_data(
             summary = description or name
             out.append([summary, name, _task_id(t.get("url", ""))])
         return out
+    # Planned works (the ClickUp "Todo" stage) renders as a numbered plan rather
+    # than a table, so it carries the fields that make each item readable on its
+    # own: what it is, when it's due, and who owns it.
+    def planned_items(source_key):
+        d = ok.get(source_key) or {}
+        out = []
+        for t in d.get("tasks", []):
+            out.append({
+                "name": t.get("name", ""),
+                "description": (t.get("description") or "").strip(),
+                "taskId": _task_id(t.get("url", "")),
+                "due": t.get("due_date") or "",
+                "assignees": [a for a in (t.get("assignees") or []) if a],
+            })
+        return out
     if "work_completed" in ok:
         data["workDone"] = tasks("work_completed")
     if "planned_works" in ok:
@@ -462,7 +479,7 @@ def _build_data(
             data["workPlannedManual"] = _comment_html(planned.get("text") or "")
             data["workPlanned"] = []
         else:
-            data["workPlanned"] = tasks("planned_works")
+            data["workPlanned"] = planned_items("planned_works")
 
     # -- SE Ranking (b11) placeholder --
     data["seranking"] = {
@@ -476,7 +493,7 @@ def _build_data(
     comments: dict[str, str] = {}
     comments_raw: dict[str, str] = {}
     for b in blocks:
-        sec = _SECTION_BY_KEY.get(b.get("block_type_key"))
+        sec = SECTION_BY_KEY.get(b.get("block_type_key"))
         if not sec:
             continue
         block_states[sec] = {

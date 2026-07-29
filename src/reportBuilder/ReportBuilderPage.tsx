@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiRequest } from "../api";
 import { sourceLabel, SOURCE_ORDER } from "./blockCatalog";
 import type {
+  AiCommentsResponse,
+  AiSummaryResponse,
   BlockCatalogResponse,
   Client,
   ClientListResponse,
@@ -56,6 +58,23 @@ const DEFAULT_CUSTOMIZATION: ReportCustomization = {
   panels: {},
 };
 
+// The block whose comment *is* the executive summary at the top of the report.
+const SUMMARY_BLOCK_KEY = "summary";
+
+/** What Claude is doing right now, so the UI can say so instead of just hanging. */
+type AiStage = null | "comments" | "summary";
+
+/** The editorial summary section, added when the specialist didn't select it —
+ * Claude's summary needs somewhere to render. */
+function summaryPlaceholderBlock(): GeneratedBlock {
+  return {
+    block_type_key: SUMMARY_BLOCK_KEY,
+    status: "ok",
+    data: { note: "", text: "" },
+    unavailable_reason: null,
+  };
+}
+
 export default function ReportBuilderPage({ token }: Props) {
   const [catalog, setCatalog] = useState<ReportBlockType[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
@@ -92,8 +111,13 @@ export default function ReportBuilderPage({ token }: Props) {
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [aiStage, setAiStage] = useState<AiStage>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  // Claude commentary is a draft-writing convenience: when it is unavailable the
+  // report is still complete and saveable, so its failures are a notice, never
+  // the page-level error.
+  const [aiNotice, setAiNotice] = useState<string | null>(null);
 
   const [settings, setSettings] = useState<ReportSettingsStatus | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -298,6 +322,8 @@ export default function ReportBuilderPage({ token }: Props) {
     setGenerated(null);
     setComments({});
     setEditingReportId(null);
+    setPreviewHtml("");
+    setAiNotice(null);
   }
 
   function toggleBlock(key: string) {
@@ -372,10 +398,80 @@ export default function ReportBuilderPage({ token }: Props) {
     }
   }
 
+  /** The report payload: each block plus the comment currently attached to it. */
+  function withComments(
+    blocks: GeneratedBlock[],
+    commentMap: Record<string, string>,
+  ): GeneratedBlock[] {
+    return blocks.map((block) => ({
+      ...block,
+      comment: commentMap[block.block_type_key] ?? "",
+    }));
+  }
+
+  function blocksForSave(): GeneratedBlock[] {
+    if (!generated) return [];
+    return withComments(generated.blocks, comments);
+  }
+
+  // Render the editable preview from an explicit set of blocks. Called at the
+  // points where the report actually changes (generate, open, post-summary) —
+  // never on every comment keystroke, which would reload the iframe mid-edit and
+  // lose focus and scroll position.
+  const refreshPreview = useCallback(
+    async (
+      blocks: GeneratedBlock[],
+      meta: { period_label: string; default_comparison: string },
+      custom: ReportCustomization,
+    ) => {
+      if (!token || !selectedClientId) {
+        setPreviewHtml("");
+        return;
+      }
+      try {
+        const response = await fetch("/api/report-builder/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            client_id: selectedClientId,
+            period_label: meta.period_label,
+            default_comparison: meta.default_comparison,
+            customization: custom,
+            blocks,
+          }),
+        });
+        if (response.ok) {
+          setPreviewHtml(await response.text());
+        }
+      } catch {
+        // preview is best-effort; keep the last good render on failure
+      }
+    },
+    [token, selectedClientId],
+  );
+
+  /** Claude's draft comment for every section that has data, keyed by block key. */
+  async function draftComments(
+    report: { period_label: string; default_comparison: string; blocks: GeneratedBlock[] },
+  ): Promise<Record<string, string>> {
+    const response = await apiRequest<AiCommentsResponse>("/api/report-builder/ai/comments", {
+      method: "POST",
+      token,
+      body: {
+        client_id: selectedClientId,
+        period_label: report.period_label,
+        default_comparison: report.default_comparison,
+        blocks: report.blocks,
+      },
+    });
+    return response.comments ?? {};
+  }
+
   async function handleGenerate() {
     if (!token || !selectedClientId || selectedKeys.size === 0) return;
     setError(null);
     setStatus(null);
+    setAiNotice(null);
     setIsGenerating(true);
     try {
       const timeframe = buildTimeframe();
@@ -394,13 +490,33 @@ export default function ReportBuilderPage({ token }: Props) {
           planned_work_text: plannedWorkText,
         },
       });
+
+      const nextComments: Record<string, string> = {};
+      response.blocks.forEach((block) => {
+        nextComments[block.block_type_key] = "";
+      });
+
+      // Claude drafts the section comments *before* the specialist sees the
+      // preview, so what they open is the data with editable commentary already
+      // in place rather than a page of empty note boxes.
+      setAiStage("comments");
+      try {
+        Object.assign(nextComments, await draftComments(response));
+        setStatus("Claude drafted the section comments — review and edit them in the preview.");
+      } catch (aiError) {
+        setAiNotice(
+          `Claude could not draft the comments (${
+            aiError instanceof Error ? aiError.message : "unknown error"
+          }). The report is ready — write the comments yourself in the preview.`,
+        );
+      } finally {
+        setAiStage(null);
+      }
+
+      setComments(nextComments);
       setGenerated(response);
       setEditingReportId(null);
-      const initialComments: Record<string, string> = {};
-      response.blocks.forEach((block) => {
-        initialComments[block.block_type_key] = "";
-      });
-      setComments(initialComments);
+      await refreshPreview(withComments(response.blocks, nextComments), response, customization);
     } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : "Failed to generate report.");
     } finally {
@@ -408,12 +524,31 @@ export default function ReportBuilderPage({ token }: Props) {
     }
   }
 
-  function blocksForSave(): GeneratedBlock[] {
-    if (!generated) return [];
-    return generated.blocks.map((block) => ({
-      ...block,
-      comment: comments[block.block_type_key] ?? "",
-    }));
+  /** Re-run the comment drafting on the report currently in the preview. */
+  async function handleRedraftComments() {
+    if (!token || !generated || !selectedClientId) return;
+    setError(null);
+    setStatus(null);
+    setAiNotice(null);
+    setAiStage("comments");
+    try {
+      const drafted = await draftComments({
+        period_label: generated.period_label,
+        default_comparison: generated.default_comparison,
+        blocks: blocksForSave(),
+      });
+      // The summary is Opus's job at submit time — a comment redraft leaves it alone.
+      const nextComments = { ...comments, ...drafted };
+      setComments(nextComments);
+      await refreshPreview(withComments(generated.blocks, nextComments), generated, customization);
+      setStatus("Claude rewrote the section comments.");
+    } catch (aiError) {
+      setAiNotice(
+        aiError instanceof Error ? aiError.message : "Claude could not rewrite the comments.",
+      );
+    } finally {
+      setAiStage(null);
+    }
   }
 
   // Notes and per-panel config are edited *inside* the preview; the iframe posts
@@ -445,47 +580,66 @@ export default function ReportBuilderPage({ token }: Props) {
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
-  // Load the editable preview once per report (on generate / open). Edits made
-  // inside it flow back via postMessage above, so this must NOT depend on
-  // comments/customization or it would reload mid-edit.
-  useEffect(() => {
-    if (!token || !generated || !selectedClientId) {
-      setPreviewHtml("");
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const response = await fetch("/api/report-builder/preview", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-          body: JSON.stringify({
-            client_id: selectedClientId,
-            period_label: generated.period_label,
-            default_comparison: generated.default_comparison,
-            customization,
-            blocks: blocksForSave(),
-          }),
-        });
-        if (response.ok && !cancelled) {
-          setPreviewHtml(await response.text());
-        }
-      } catch {
-        // preview is best-effort; keep the last good render on failure
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, selectedClientId, generated, editingReportId]);
-
+  /**
+   * Submit: Claude reads the whole submitted report — data plus the comments the
+   * specialist just reviewed — and writes the executive summary that opens it.
+   * The preview is updated with that summary, and only then is the report stored
+   * as the final variant. A Claude failure here degrades to saving without a
+   * generated summary rather than losing the report.
+   */
   async function handleSave() {
     if (!token || !generated || !selectedClientId) return;
     setError(null);
     setStatus(null);
+    setAiNotice(null);
     setIsSaving(true);
     try {
+      // The summary needs a section to render in; add one if it wasn't selected.
+      const hasSummaryBlock = generated.blocks.some(
+        (block) => block.block_type_key === SUMMARY_BLOCK_KEY,
+      );
+      const reportBlocks = hasSummaryBlock
+        ? generated.blocks
+        : [...generated.blocks, summaryPlaceholderBlock()];
+      let finalComments = comments;
+
+      setAiStage("summary");
+      try {
+        const response = await apiRequest<AiSummaryResponse>("/api/report-builder/ai/summary", {
+          method: "POST",
+          token,
+          body: {
+            client_id: selectedClientId,
+            period_label: generated.period_label,
+            default_comparison: generated.default_comparison,
+            blocks: withComments(reportBlocks, comments),
+            existing_summary: comments[SUMMARY_BLOCK_KEY] ?? "",
+          },
+        });
+        finalComments = { ...comments, [SUMMARY_BLOCK_KEY]: response.summary };
+        setComments(finalComments);
+        if (!hasSummaryBlock) {
+          setGenerated({ ...generated, blocks: reportBlocks });
+          setSelectedKeys((current) => new Set(current).add(SUMMARY_BLOCK_KEY));
+        }
+        // Show the specialist the summary that is about to be saved.
+        await refreshPreview(
+          withComments(reportBlocks, finalComments),
+          generated,
+          customization,
+        );
+        setStatus("Claude wrote the report summary — saving the final version…");
+      } catch (aiError) {
+        setAiNotice(
+          `Claude could not write the report summary (${
+            aiError instanceof Error ? aiError.message : "unknown error"
+          }). Saving the report as it stands.`,
+        );
+      } finally {
+        setAiStage(null);
+      }
+
+      const finalBlocks = withComments(reportBlocks, finalComments);
       if (editingReportId) {
         await apiRequest<ReportSummary>(`/api/report-builder/reports/${editingReportId}`, {
           method: "PUT",
@@ -494,7 +648,7 @@ export default function ReportBuilderPage({ token }: Props) {
             period_label: generated.period_label,
             default_comparison: generated.default_comparison,
             customization,
-            blocks: blocksForSave(),
+            blocks: finalBlocks,
           },
         });
         setStatus("Report updated.");
@@ -507,7 +661,7 @@ export default function ReportBuilderPage({ token }: Props) {
             period_label: generated.period_label,
             default_comparison: generated.default_comparison,
             customization,
-            blocks: blocksForSave(),
+            blocks: finalBlocks,
           },
         });
         setEditingReportId(saved.id);
@@ -525,14 +679,16 @@ export default function ReportBuilderPage({ token }: Props) {
     if (!token) return;
     setError(null);
     setStatus(null);
+    setAiNotice(null);
     try {
       const detail = await apiRequest<ReportDetail>(`/api/report-builder/reports/${reportId}`, { token });
-      setGenerated({
+      const reopened = {
         client_id: detail.client_id,
         period_label: detail.period_label,
         default_comparison: detail.default_comparison,
         blocks: detail.blocks,
-      });
+      };
+      setGenerated(reopened);
       const loadedComments: Record<string, string> = {};
       const loadedKeys = new Set<string>();
       detail.blocks.forEach((block) => {
@@ -545,8 +701,16 @@ export default function ReportBuilderPage({ token }: Props) {
       });
       setComments(loadedComments);
       setSelectedKeys(loadedKeys);
-      setCustomization(detail.customization ?? DEFAULT_CUSTOMIZATION);
+      const reopenedCustomization = detail.customization ?? DEFAULT_CUSTOMIZATION;
+      setCustomization(reopenedCustomization);
       setEditingReportId(detail.id);
+      // A reopened report keeps the comments and summary it was saved with —
+      // nothing is redrafted behind the specialist's back.
+      await refreshPreview(
+        withComments(detail.blocks, loadedComments),
+        reopened,
+        reopenedCustomization,
+      );
       setStatus(`Opened report from ${new Date(detail.updated_at).toLocaleString()}.`);
     } catch (openError) {
       setError(openError instanceof Error ? openError.message : "Failed to open report.");
@@ -616,6 +780,7 @@ export default function ReportBuilderPage({ token }: Props) {
     <section className="page active report-builder-page">
       {error ? <div className="status-banner">{error}</div> : null}
       {status ? <div className="status-banner">{status}</div> : null}
+      {aiNotice ? <div className="status-banner">{aiNotice}</div> : null}
 
       {/* Integrations / settings */}
       <article className="panel report-settings-panel">
@@ -932,7 +1097,11 @@ export default function ReportBuilderPage({ token }: Props) {
               onClick={() => void handleGenerate()}
               disabled={!canGenerate}
             >
-              {isGenerating ? "Generating…" : "Generate Report"}
+              {aiStage === "comments" && isGenerating
+                ? "Claude is writing comments…"
+                : isGenerating
+                  ? "Generating…"
+                  : "Generate Report"}
             </button>
           </div>
           {selectedKeys.size === 0 ? (
@@ -950,9 +1119,14 @@ export default function ReportBuilderPage({ token }: Props) {
             {editingReportId ? " (editing saved report)" : ""}
           </h3>
           <p className="report-hint">
-            Edit notes and per-panel settings (size, headings, body text, chart type, accent) directly in the
-            preview below. Sections with no data are excluded automatically. These controls are removed from the
-            client version — your settings and notes are kept when you Save.
+            Claude has drafted a comment for every section from the whole report's data — they are yours to
+            edit. Change notes and per-panel settings (size, headings, body text, chart type, accent) directly
+            in the preview below. Sections with no data are excluded automatically. These controls are removed
+            from the client version — your settings and notes are kept when you Save.
+          </p>
+          <p className="report-hint">
+            On Save, Claude reads the finished report and writes the summary at the top, updates the preview
+            with it, and then stores the final version.
           </p>
 
           {/* The class toggles on the wrapper, never on the iframe's position in the
@@ -975,12 +1149,26 @@ export default function ReportBuilderPage({ token }: Props) {
 
           <div className="modal-actions">
             <button
+              className="ghost-btn"
+              type="button"
+              onClick={() => void handleRedraftComments()}
+              disabled={aiStage !== null || isSaving}
+            >
+              {aiStage === "comments" ? "Claude is writing…" : "↻ Rewrite comments with Claude"}
+            </button>
+            <button
               className="primary-btn"
               type="button"
               onClick={() => void handleSave()}
-              disabled={isSaving}
+              disabled={isSaving || aiStage !== null}
             >
-              {isSaving ? "Saving…" : editingReportId ? "Save changes" : "Save"}
+              {aiStage === "summary"
+                ? "Claude is writing the summary…"
+                : isSaving
+                  ? "Saving…"
+                  : editingReportId
+                    ? "Submit & save changes"
+                    : "Submit & save"}
             </button>
           </div>
         </article>

@@ -72,6 +72,19 @@ export type ReportDetail = ReportSummary & {
   blocks: GeneratedBlock[];
 };
 
+/** Claude's draft comment per block key, written before the preview is shown. */
+export type AiCommentsResponse = {
+  comments: Record<string, string>;
+  model: string;
+};
+
+/** Claude's executive summary, written from the submitted report. */
+export type AiSummaryResponse = {
+  summary: string;
+  model: string;
+  block_type_key: string;
+};
+
 export type ReportSettingsStatus = {
   clickup_configured: boolean;
   clickup_token_hint: string | null;

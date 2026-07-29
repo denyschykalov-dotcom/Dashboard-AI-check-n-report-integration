@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from backend.app.auth import AuthenticatedUser, get_current_user
 from backend.app.db import SessionLocal, get_db_session
 from backend.app.models import Client, Profile
+from backend.app.report_builder import ai_commentary
 from backend.app.report_builder import export as report_export
 from backend.app.report_builder import selections_service as report_selections_service
 from backend.app.report_builder import service as report_service
@@ -30,13 +31,14 @@ from backend.app.schemas import (
     HistoryForwardRequest,
     HistoryForwardResponse,
     ProfileUpsertRequest,
+    ReportAiRequest,
     ReportPreviewRequest,
     ReportSaveRequest,
     ReportUpdateRequest,
     RunStartRequest,
     SelectionSaveRequest,
 )
-from backend.app.service_container import get_run_service
+from backend.app.service_container import get_ai_commentary_client, get_run_service
 from backend.app.utils import utcnow
 
 
@@ -695,6 +697,80 @@ def preview_report(
         editable=True,
     )
     return Response(content=document, media_type="text/html")
+
+
+@router.post("/report-builder/ai/comments")
+def write_report_comments(
+    payload: ReportAiRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """Claude's draft comment for each section, keyed by block key.
+
+    Runs between generate and the first preview render, so the specialist opens a
+    report that already has commentary to edit rather than empty note boxes. The
+    whole report goes in as context — a section's comment may explain itself by
+    reference to another section.
+    """
+    client = session.get(Client, payload.client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found.")
+
+    blocks = [block.model_dump() for block in payload.blocks]
+    ai_client = get_ai_commentary_client()
+    block_keys = ai_commentary.commentable_block_keys(blocks)
+    if not block_keys:
+        return {"comments": {}, "model": ai_client.comment_model}
+
+    context = ai_commentary.build_report_context(
+        client_name=client.name,
+        client_domain=client.domain,
+        period_label=payload.period_label,
+        default_comparison=payload.default_comparison,
+        blocks=blocks,
+    )
+    try:
+        comments = ai_client.generate_block_comments(context=context, block_keys=block_keys)
+    except ai_commentary.AICommentaryUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return {"comments": comments, "model": ai_client.comment_model}
+
+
+@router.post("/report-builder/ai/summary")
+def write_report_summary(
+    payload: ReportAiRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """The report-wide executive summary that opens the report.
+
+    Written at submit time from the final data plus the comments the specialist
+    reviewed, so it can only ever agree with what the report already says.
+    """
+    client = session.get(Client, payload.client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found.")
+
+    context = ai_commentary.build_report_context(
+        client_name=client.name,
+        client_domain=client.domain,
+        period_label=payload.period_label,
+        default_comparison=payload.default_comparison,
+        blocks=[block.model_dump() for block in payload.blocks],
+        include_comments=True,
+    )
+    ai_client = get_ai_commentary_client()
+    try:
+        summary = ai_client.generate_summary(
+            context=context, existing_summary=payload.existing_summary
+        )
+    except ai_commentary.AICommentaryUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return {
+        "summary": summary,
+        "model": ai_client.summary_model,
+        "block_type_key": ai_commentary.SUMMARY_BLOCK_KEY,
+    }
 
 
 @router.get("/report-builder/clients/{client_id}/selection")

@@ -132,6 +132,10 @@ def build_settings(database_url: str) -> Settings:
         openai_api_key="test",
         gemini_api_key="test",
         grok_api_key="test",
+        anthropic_api_key="test",
+        anthropic_comment_model="test-claude-comment",
+        anthropic_summary_model="test-claude-summary",
+        report_summary_max_chars=1500,
         openai_model="test-openai",
         gemini_model="test-gemini",
         gemini_analysis_model="test-gemini-analysis",
@@ -147,6 +151,8 @@ def build_settings(database_url: str) -> Settings:
         total_iterations=3,
         iteration_analysis_prompt_file=Path("iteration-analysis.txt"),
         final_sentiment_prompt_file=Path("final-sentiment.txt"),
+        report_block_comment_prompt_file=Path("report-block-comment.txt"),
+        report_summary_prompt_file=Path("report-summary.txt"),
     )
 
 

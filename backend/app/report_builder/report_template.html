@@ -167,6 +167,38 @@ tbody tr:hover{background:#FBFCFE}
 .summary-card b{color:#fff}.summary-card .hl{color:#7db3ff;font-weight:600}
 .edit-hint{font-size:11px;color:var(--faint);margin-top:6px}
 .planned-manual{white-space:pre-wrap;font-size:14px;line-height:1.7;color:var(--ink)}
+
+/* Planned works (ClickUp "Todo") reads as a numbered plan, not a table: one card
+   per item, a numbered badge, the task as the headline, and its due date /
+   owners as chips. Figures inside a description are highlighted so the client's
+   eye lands on the concrete part of each plan. */
+.plan-count{display:flex;align-items:baseline;gap:8px;margin-bottom:14px;
+  font-size:12.5px;color:var(--muted)}
+.plan-count b{font-size:20px;color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums}
+.planlist{list-style:none;margin:0;padding:0;counter-reset:plan;
+  display:grid;gap:10px}
+.planlist>li{counter-increment:plan;position:relative;display:grid;
+  grid-template-columns:34px 1fr;gap:14px;align-items:start;
+  background:var(--bg2);border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:12px;padding:14px 16px}
+.planlist>li:before{content:counter(plan);grid-column:1;
+  width:30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;
+  display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:700;font-variant-numeric:tabular-nums}
+.planlist .pi-body{grid-column:2;min-width:0}
+.planlist .pi-name{font-size:calc(14.5px * var(--sec-scale,1));font-weight:700;color:var(--ink);
+  line-height:1.4}
+.planlist .pi-desc{margin-top:5px;font-size:13px;color:var(--muted);line-height:1.6;
+  white-space:pre-wrap;overflow-wrap:anywhere}
+.planlist .pi-desc .hl{color:var(--ink);font-weight:700;background:#FFF0F7;
+  border-radius:4px;padding:0 3px}
+.planlist .pi-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+.planlist .chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;
+  background:#fff;border:1px solid var(--line);border-radius:999px;padding:2px 9px;color:var(--muted)}
+.planlist .chip.due{background:#FEF7E0;border-color:#F3E3B0;color:#7a5b00;font-weight:600}
+.planlist .chip.owner{background:var(--blue-lt);border-color:#D5E1FF;color:#174ea6}
+.planlist .chip.id{font-variant-numeric:tabular-nums}
+.planlist .chip.id a{color:var(--muted)}
 .foot{margin-top:50px;text-align:center;color:var(--faint);font-size:12px}
 
 @media print{
@@ -176,6 +208,7 @@ tbody tr:hover{background:#FBFCFE}
   body{background:#fff}
   .block{page-break-inside:avoid}
   .cmt{border-color:#d0d0d0}
+  .planlist>li{page-break-inside:avoid}
   .card,.scoregrid{box-shadow:none}
 }
 </style></head><body>
@@ -762,12 +795,45 @@ function taskTable(id, rows){
     rows.map(r=>`<tr><td>${esc(r[0])}</td><td class="muted">${esc(r[1])}</td>
      <td><a href="https://app.clickup.com/t/${r[2]}" target="_blank" class="small">${r[2]}</a></td></tr>`).join('')}</tbody></table>`;
 }
+// A due date as the client reads it ("12 Aug 2026"); anything unparseable is
+// shown verbatim rather than dropped.
+function planDate(iso){
+  const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso||''));
+  if(!m) return String(iso||'');
+  const mo=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(m[2])-1];
+  return mo ? (Number(m[3])+' '+mo+' '+m[1]) : String(iso);
+}
+// Highlight the concrete parts of a plan description — counts, percentages,
+// money — so each item's substance is visible at a glance.
+function planHighlight(text){
+  return esc(text).replace(/(\d+(?:[.,]\d+)*(?:\s?%)?)/g, '<span class="hl">$1</span>');
+}
+function planItem(t, i){
+  const name=t.name||('Task '+(i+1));
+  const chips=[];
+  if(t.due) chips.push('<span class="chip due">Due '+esc(planDate(t.due))+'</span>');
+  (t.assignees||[]).forEach(a=>chips.push('<span class="chip owner">'+esc(a)+'</span>'));
+  if(t.taskId) chips.push('<span class="chip id"><a href="https://app.clickup.com/t/'+
+    esc(t.taskId)+'" target="_blank" rel="noopener">#'+esc(t.taskId)+'</a></span>');
+  // The description repeats the title on tasks that have none — don't print it twice.
+  const desc=(t.description||'').trim();
+  const showDesc = desc && desc!==String(name).trim();
+  return '<li><div class="pi-body">'+
+    '<div class="pi-name">'+esc(name)+'</div>'+
+    (showDesc?'<div class="pi-desc">'+planHighlight(desc)+'</div>':'')+
+    (chips.length?'<div class="pi-meta">'+chips.join('')+'</div>':'')+
+    '</div></li>';
+}
 function renderPlanned(){
   const manual=DATA.workPlannedManual||'';
   const mEl=document.getElementById('planManual'), tEl=document.getElementById('planTable');
   if(manual){ mEl.innerHTML=manual; mEl.style.display='block'; tEl.style.display='none'; return; }
   mEl.style.display='none'; tEl.style.display='';
-  taskTable('planTable', DATA.workPlanned||[]);
+  const items=DATA.workPlanned||[];
+  if(!items.length){ tEl.innerHTML='<div class="muted small">No planned tasks for the next period.</div>'; return; }
+  tEl.innerHTML='<div class="plan-count"><b>'+items.length+'</b> '+
+    (items.length===1?'task':'tasks')+' planned for the next period</div>'+
+    '<ol class="planlist">'+items.map(planItem).join('')+'</ol>';
 }
 function renderSummary(){
   const el=document.getElementById('summary');

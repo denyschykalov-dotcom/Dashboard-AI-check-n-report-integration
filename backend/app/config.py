@@ -71,6 +71,12 @@ class Settings:
     openai_api_key: typing.Optional[str]
     gemini_api_key: typing.Optional[str]
     grok_api_key: typing.Optional[str]
+    anthropic_api_key: typing.Optional[str]
+    # Report Builder commentary: Sonnet writes the per-block comments (many short
+    # calls), Opus writes the one report-wide summary.
+    anthropic_comment_model: str
+    anthropic_summary_model: str
+    report_summary_max_chars: int
     openai_model: str
     gemini_model: str
     gemini_analysis_model: str
@@ -86,6 +92,8 @@ class Settings:
     total_iterations: int
     iteration_analysis_prompt_file: Path
     final_sentiment_prompt_file: Path
+    report_block_comment_prompt_file: Path
+    report_summary_prompt_file: Path
 
 
 @lru_cache(maxsize=1)
@@ -130,6 +138,16 @@ def get_settings() -> Settings:
         openai_api_key=_read_env("OPENAI_API_KEY"),
         gemini_api_key=_read_env("GEMINI_API_KEY"),
         grok_api_key=_read_env("GROK_API_KEY") or _read_env("XAI_API_KEY"),
+        anthropic_api_key=_read_env("ANTHROPIC_API_KEY"),
+        anthropic_comment_model=(
+            _read_env("ANTHROPIC_COMMENT_MODEL", "claude-sonnet-5") or "claude-sonnet-5"
+        ),
+        anthropic_summary_model=(
+            _read_env("ANTHROPIC_SUMMARY_MODEL", "claude-opus-5") or "claude-opus-5"
+        ),
+        report_summary_max_chars=max(
+            int(_read_env("REPORT_SUMMARY_MAX_CHARS", "1500") or "1500"), 200
+        ),
         openai_model=_read_env("OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
         gemini_model=_read_env(
             "GEMINI_MODEL", "gemini-2.0-flash") or "gemini-2.0-flash",
@@ -164,4 +182,6 @@ def get_settings() -> Settings:
         total_iterations=3,
         iteration_analysis_prompt_file=PROMPTS_ROOT / "iteration_analysis.txt",
         final_sentiment_prompt_file=PROMPTS_ROOT / "final_sentiment.txt",
+        report_block_comment_prompt_file=PROMPTS_ROOT / "report_block_comment.txt",
+        report_summary_prompt_file=PROMPTS_ROOT / "report_summary.txt",
     )

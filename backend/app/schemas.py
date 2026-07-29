@@ -133,5 +133,21 @@ class ReportPreviewRequest(BaseModel):
     blocks: list[ReportBlockPayload] = Field(default_factory=list)
 
 
+class ReportAiRequest(BaseModel):
+    """A report in progress, sent to Claude for commentary.
+
+    Same payload as the preview request: the unsaved blocks plus enough meta for
+    the model to know what period it is writing about.
+    """
+
+    client_id: uuid.UUID
+    period_label: str = ""
+    default_comparison: str = "mom"
+    blocks: list[ReportBlockPayload] = Field(default_factory=list)
+    # Only used by the summary call: a summary the specialist already drafted, to
+    # be polished rather than replaced.
+    existing_summary: str = ""
+
+
 class ClickUpTokenRequest(BaseModel):
     token: str = Field(min_length=1, max_length=200)
