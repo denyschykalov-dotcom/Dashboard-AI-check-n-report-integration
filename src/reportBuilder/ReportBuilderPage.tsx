@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiRequest } from "../api";
 import { sourceLabel, SOURCE_ORDER } from "./blockCatalog";
@@ -6,17 +6,54 @@ import type {
   BlockCatalogResponse,
   Client,
   ClientListResponse,
+  ComparisonMode,
   GeneratedBlock,
   GenerateReportResponse,
+  PeriodPreset,
+  PlannedWorkMode,
+  ReportCustomization,
   ReportDetail,
   ReportListResponse,
+  ReportSelection,
   ReportSettingsStatus,
   ReportSummary,
+  ReportType,
   ReportBlockType,
 } from "./types";
 
 type Props = {
   token: string | null;
+};
+
+const PERIOD_OPTIONS: { value: PeriodPreset; label: string }[] = [
+  { value: "last_month", label: "Last month" },
+  { value: "last_3_months", label: "Last 3 months" },
+];
+
+// Each chosen comparison becomes a toggle in the exported report, so a specialist
+// can hand the client one report that switches between them.
+const COMPARISON_OPTIONS: { value: ComparisonMode; label: string }[] = [
+  { value: "mom", label: "The previous period" },
+  { value: "yoy", label: "The same period last year" },
+];
+
+const PERIOD_VALUES = PERIOD_OPTIONS.map((option) => option.value);
+const COMPARISON_VALUES = COMPARISON_OPTIONS.map((option) => option.value);
+
+function isPeriodPreset(value: string | null | undefined): value is PeriodPreset {
+  return !!value && (PERIOD_VALUES as string[]).includes(value);
+}
+
+function toComparisonModes(values: string[] | null | undefined): ComparisonMode[] {
+  return (values ?? []).filter((value): value is ComparisonMode =>
+    (COMPARISON_VALUES as string[]).includes(value),
+  );
+}
+
+const DEFAULT_CUSTOMIZATION: ReportCustomization = {
+  accent: "#E6007A",
+  charts: {},
+  panels: {},
 };
 
 export default function ReportBuilderPage({ token }: Props) {
@@ -29,8 +66,26 @@ export default function ReportBuilderPage({ token }: Props) {
   const [newClientDomain, setNewClientDomain] = useState("");
 
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+
+  const [periodPreset, setPeriodPreset] = useState<PeriodPreset>("last_month");
+  const [comparisons, setComparisons] = useState<ComparisonMode[]>(["mom"]);
+  const [useAdvanced, setUseAdvanced] = useState<boolean>(false);
+  const [reportType, setReportType] = useState<ReportType>("monthly");
+  const [dateFrom, setDateFrom] = useState<string>("");
+  const [dateTo, setDateTo] = useState<string>("");
+  const [reportYear, setReportYear] = useState<string>(String(new Date().getFullYear()));
+
+  const [plannedWorkMode, setPlannedWorkMode] = useState<PlannedWorkMode>("clickup");
+  const [plannedWorkText, setPlannedWorkText] = useState<string>("");
+  // The client id whose saved selection has finished loading — guards the
+  // auto-save effect so it never clobbers a selection before it's restored.
+  const selectionLoadedFor = useRef<string | null>(null);
+
   const [generated, setGenerated] = useState<GenerateReportResponse | null>(null);
   const [comments, setComments] = useState<Record<string, string>>({});
+  const [customization, setCustomization] = useState<ReportCustomization>(DEFAULT_CUSTOMIZATION);
+  const [previewHtml, setPreviewHtml] = useState<string>("");
+  const [previewExpanded, setPreviewExpanded] = useState(false);
   const [editingReportId, setEditingReportId] = useState<string | null>(null);
 
   const [savedReports, setSavedReports] = useState<ReportSummary[]>([]);
@@ -45,14 +100,6 @@ export default function ReportBuilderPage({ token }: Props) {
   const [clickupTokenInput, setClickupTokenInput] = useState("");
   const [isSavingToken, setIsSavingToken] = useState(false);
 
-  const displayNameByKey = useMemo(() => {
-    const map: Record<string, string> = {};
-    catalog.forEach((block) => {
-      map[block.key] = block.display_name;
-    });
-    return map;
-  }, [catalog]);
-
   const groupedCatalog = useMemo(() => {
     const groups = new Map<string, ReportBlockType[]>();
     catalog.forEach((block) => {
@@ -65,6 +112,49 @@ export default function ReportBuilderPage({ token }: Props) {
       blocks: groups.get(source) as ReportBlockType[],
     }));
   }, [catalog]);
+
+  const yearOptions = useMemo(() => {
+    const now = new Date().getFullYear();
+    return Array.from({ length: 7 }, (_, index) => String(now - index));
+  }, []);
+
+  // The timeframe portion of a generate/selection request. In preset mode the
+  // backend derives the window from the period preset, so no dates are sent, and
+  // the chosen comparisons ride along; in Advanced mode the custom-range /
+  // full-year controls drive the window instead.
+  const buildTimeframe = useCallback((): {
+    period_preset: PeriodPreset | null;
+    comparisons: ComparisonMode[];
+    report_type: ReportType;
+    date_from: string | null;
+    date_to: string | null;
+  } => {
+    if (!useAdvanced) {
+      return {
+        period_preset: periodPreset,
+        comparisons,
+        report_type: "monthly",
+        date_from: null,
+        date_to: null,
+      };
+    }
+    const base = { period_preset: null, comparisons };
+    if (reportType === "yearly") {
+      return { ...base, report_type: "yearly", date_from: `${reportYear}-01-01`, date_to: `${reportYear}-12-31` };
+    }
+    return { ...base, report_type: "monthly", date_from: dateFrom || null, date_to: dateTo || null };
+  }, [useAdvanced, periodPreset, comparisons, reportType, reportYear, dateFrom, dateTo]);
+
+  function toggleComparison(mode: ComparisonMode) {
+    setComparisons((current) => {
+      if (current.includes(mode)) {
+        // never leave the report with no comparison to show
+        return current.length > 1 ? current.filter((value) => value !== mode) : current;
+      }
+      // keep the catalog order so the report's toggles are always in the same order
+      return COMPARISON_VALUES.filter((value) => value === mode || current.includes(value));
+    });
+  }
 
   const loadClients = useCallback(async () => {
     if (!token) return;
@@ -106,6 +196,37 @@ export default function ReportBuilderPage({ token }: Props) {
     })();
   }, [token, loadClients]);
 
+  const loadSelection = useCallback(
+    async (clientId: string) => {
+      if (!token || !clientId) return;
+      const selection = await apiRequest<ReportSelection>(
+        `/api/report-builder/clients/${clientId}/selection`,
+        { token },
+      );
+      setSelectedKeys(new Set(selection.block_keys));
+      const kind: ReportType = selection.report_type === "yearly" ? "yearly" : "monthly";
+      setReportType(kind);
+      setDateFrom(selection.date_from ?? "");
+      setDateTo(selection.date_to ?? "");
+      if (kind === "yearly" && selection.date_from) {
+        setReportYear(selection.date_from.slice(0, 4));
+      }
+      const savedComparisons = toComparisonModes(selection.comparisons);
+      if (savedComparisons.length > 0) {
+        setComparisons(savedComparisons);
+      }
+      // A saved period preset means preset mode; otherwise the specialist last
+      // used the Advanced custom-range / full-year controls.
+      if (isPeriodPreset(selection.period_preset)) {
+        setPeriodPreset(selection.period_preset);
+        setUseAdvanced(false);
+      } else {
+        setUseAdvanced(true);
+      }
+    },
+    [token],
+  );
+
   useEffect(() => {
     if (!selectedClientId) {
       setSavedReports([]);
@@ -115,6 +236,63 @@ export default function ReportBuilderPage({ token }: Props) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load saved reports.");
     });
   }, [selectedClientId, loadSavedReports]);
+
+  useEffect(() => {
+    if (!selectedClientId) {
+      selectionLoadedFor.current = null;
+      return;
+    }
+    selectionLoadedFor.current = null;
+    void loadSelection(selectedClientId)
+      .catch(() => {
+        // no saved selection yet (or load failed) — start from a clean slate
+        setSelectedKeys(new Set());
+      })
+      .finally(() => {
+        selectionLoadedFor.current = selectedClientId;
+      });
+  }, [selectedClientId, loadSelection]);
+
+  // Persist the checkbox selection + timeframe per client (debounced) so
+  // reopening a client restores the previous report's starting point.
+  useEffect(() => {
+    if (!token || !selectedClientId) return;
+    if (selectionLoadedFor.current !== selectedClientId) return;
+    const timeframe = buildTimeframe();
+    const handle = window.setTimeout(() => {
+      void apiRequest(`/api/report-builder/clients/${selectedClientId}/selection`, {
+        method: "PUT",
+        token,
+        body: {
+          block_keys: Array.from(selectedKeys),
+          period_preset: timeframe.period_preset,
+          comparisons: timeframe.comparisons,
+          report_type: timeframe.report_type,
+          date_from: timeframe.date_from,
+          date_to: timeframe.date_to,
+        },
+      }).catch(() => {
+        // best-effort persistence; a failed save must not disrupt the UI
+      });
+    }, 600);
+    return () => window.clearTimeout(handle);
+  }, [token, selectedClientId, selectedKeys, buildTimeframe]);
+
+  // Esc leaves the full-screen preview, and the page behind it must not scroll
+  // out from under the overlay.
+  useEffect(() => {
+    if (!previewExpanded) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setPreviewExpanded(false);
+    }
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [previewExpanded]);
 
   function resetReportState() {
     setGenerated(null);
@@ -200,10 +378,21 @@ export default function ReportBuilderPage({ token }: Props) {
     setStatus(null);
     setIsGenerating(true);
     try {
+      const timeframe = buildTimeframe();
       const response = await apiRequest<GenerateReportResponse>("/api/report-builder/generate", {
         method: "POST",
         token,
-        body: { client_id: selectedClientId, block_keys: Array.from(selectedKeys) },
+        body: {
+          client_id: selectedClientId,
+          block_keys: Array.from(selectedKeys),
+          period_preset: timeframe.period_preset,
+          comparisons: timeframe.comparisons,
+          report_type: timeframe.report_type,
+          date_from: timeframe.date_from,
+          date_to: timeframe.date_to,
+          planned_work_mode: plannedWorkMode,
+          planned_work_text: plannedWorkText,
+        },
       });
       setGenerated(response);
       setEditingReportId(null);
@@ -227,6 +416,70 @@ export default function ReportBuilderPage({ token }: Props) {
     }));
   }
 
+  // Notes and per-panel config are edited *inside* the preview; the iframe posts
+  // each change up so it persists on Save — without reloading the iframe (which
+  // would lose focus/scroll). The preview itself only reloads on a new report.
+  useEffect(() => {
+    function onMessage(event: MessageEvent) {
+      const data = event.data as
+        | { source?: string; kind?: string; key?: string | null; value?: unknown }
+        | null;
+      if (!data || data.source !== "report-preview") return;
+      if (data.kind === "note" && typeof data.key === "string") {
+        const key = data.key;
+        setComments((current) => ({ ...current, [key]: String(data.value ?? "") }));
+      } else if (data.kind === "accent") {
+        setCustomization((current) => ({ ...current, accent: String(data.value ?? "") }));
+      } else if (data.kind === "chart" && typeof data.key === "string") {
+        const key = data.key;
+        setCustomization((current) => ({ ...current, charts: { ...current.charts, [key]: String(data.value ?? "") } }));
+      } else if (data.kind === "panel" && typeof data.key === "string") {
+        const key = data.key;
+        setCustomization((current) => ({
+          ...current,
+          panels: { ...current.panels, [key]: data.value as ReportCustomization["panels"][string] },
+        }));
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  // Load the editable preview once per report (on generate / open). Edits made
+  // inside it flow back via postMessage above, so this must NOT depend on
+  // comments/customization or it would reload mid-edit.
+  useEffect(() => {
+    if (!token || !generated || !selectedClientId) {
+      setPreviewHtml("");
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch("/api/report-builder/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            client_id: selectedClientId,
+            period_label: generated.period_label,
+            default_comparison: generated.default_comparison,
+            customization,
+            blocks: blocksForSave(),
+          }),
+        });
+        if (response.ok && !cancelled) {
+          setPreviewHtml(await response.text());
+        }
+      } catch {
+        // preview is best-effort; keep the last good render on failure
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, selectedClientId, generated, editingReportId]);
+
   async function handleSave() {
     if (!token || !generated || !selectedClientId) return;
     setError(null);
@@ -237,7 +490,12 @@ export default function ReportBuilderPage({ token }: Props) {
         await apiRequest<ReportSummary>(`/api/report-builder/reports/${editingReportId}`, {
           method: "PUT",
           token,
-          body: { period_label: generated.period_label, blocks: blocksForSave() },
+          body: {
+            period_label: generated.period_label,
+            default_comparison: generated.default_comparison,
+            customization,
+            blocks: blocksForSave(),
+          },
         });
         setStatus("Report updated.");
       } else {
@@ -247,6 +505,8 @@ export default function ReportBuilderPage({ token }: Props) {
           body: {
             client_id: selectedClientId,
             period_label: generated.period_label,
+            default_comparison: generated.default_comparison,
+            customization,
             blocks: blocksForSave(),
           },
         });
@@ -270,6 +530,7 @@ export default function ReportBuilderPage({ token }: Props) {
       setGenerated({
         client_id: detail.client_id,
         period_label: detail.period_label,
+        default_comparison: detail.default_comparison,
         blocks: detail.blocks,
       });
       const loadedComments: Record<string, string> = {};
@@ -277,9 +538,14 @@ export default function ReportBuilderPage({ token }: Props) {
       detail.blocks.forEach((block) => {
         loadedComments[block.block_type_key] = block.comment ?? "";
         loadedKeys.add(block.block_type_key);
+        if (block.block_type_key === "planned_works" && block.data && (block.data as { mode?: string }).mode === "manual") {
+          setPlannedWorkMode("manual");
+          setPlannedWorkText(String((block.data as { text?: string }).text ?? ""));
+        }
       });
       setComments(loadedComments);
       setSelectedKeys(loadedKeys);
+      setCustomization(detail.customization ?? DEFAULT_CUSTOMIZATION);
       setEditingReportId(detail.id);
       setStatus(`Opened report from ${new Date(detail.updated_at).toLocaleString()}.`);
     } catch (openError) {
@@ -310,6 +576,26 @@ export default function ReportBuilderPage({ token }: Props) {
       URL.revokeObjectURL(url);
     } catch (exportError) {
       setError(exportError instanceof Error ? exportError.message : "Failed to export report.");
+    }
+  }
+
+  async function handlePreview(reportId: string) {
+    if (!token) return;
+    setError(null);
+    try {
+      const response = await fetch(`/api/report-builder/reports/${reportId}/export`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        throw new Error(`Preview failed with ${response.status}`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener");
+      // give the new tab time to load before revoking
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (previewError) {
+      setError(previewError instanceof Error ? previewError.message : "Failed to preview report.");
     }
   }
 
@@ -352,12 +638,23 @@ export default function ReportBuilderPage({ token }: Props) {
         {showSettings ? (
           <div className="report-settings-body">
             <p className="report-hint">
-              Enter your personal ClickUp API token (ClickUp → Settings → Apps → API Token). It is stored
-              encrypted and used only to pull your workspace's task lists for the Work completed / Planned
-              works blocks, matched to each client by name.
+              Enter your personal ClickUp API token. It is stored encrypted and used only to pull your
+              workspace's task lists for the Work completed / Planned works blocks, matched to each client
+              by name.
             </p>
             <label className="field-stack">
-              <span>ClickUp API token</span>
+              <span>
+                ClickUp API token{" "}
+                <span
+                  className="info-badge"
+                  tabIndex={0}
+                  role="img"
+                  aria-label="Where to find your ClickUp API token"
+                  title="Where to find it: Open ClickUp → Profile → Settings → ClickUp API → Generate API Token"
+                >
+                  i
+                </span>
+              </span>
               <input
                 className="auth-input"
                 type="password"
@@ -453,6 +750,120 @@ export default function ReportBuilderPage({ token }: Props) {
       {selectedClientId ? (
         <article className="panel">
           <p className="eyebrow">Step 2</p>
+          <h3>Comparison period</h3>
+          <div className="report-timeframe">
+            {!useAdvanced ? (
+              <div className="report-timeframe-group">
+                <h4>Period</h4>
+                <div className="report-timeframe-modes">
+                  {PERIOD_OPTIONS.map((option) => (
+                    <label key={option.value} className="report-timeframe-mode">
+                      <input
+                        type="radio"
+                        name="period-preset"
+                        checked={periodPreset === option.value}
+                        onChange={() => setPeriodPreset(option.value)}
+                      />
+                      <span>{option.label}</span>
+                    </label>
+                  ))}
+                </div>
+                <p className="report-hint">Ends with the last completed month.</p>
+              </div>
+            ) : (
+              <>
+                <div className="report-timeframe-modes">
+                  <label className="report-timeframe-mode">
+                    <input
+                      type="radio"
+                      name="report-type"
+                      checked={reportType === "monthly"}
+                      onChange={() => setReportType("monthly")}
+                    />
+                    <span>Custom range</span>
+                  </label>
+                  <label className="report-timeframe-mode">
+                    <input
+                      type="radio"
+                      name="report-type"
+                      checked={reportType === "yearly"}
+                      onChange={() => setReportType("yearly")}
+                    />
+                    <span>Full year</span>
+                  </label>
+                </div>
+                {reportType === "monthly" ? (
+                  <div className="report-timeframe-range">
+                    <label className="field-stack">
+                      <span>From</span>
+                      <input
+                        className="auth-input"
+                        type="date"
+                        value={dateFrom}
+                        max={dateTo || undefined}
+                        onChange={(event) => setDateFrom(event.target.value)}
+                      />
+                    </label>
+                    <label className="field-stack">
+                      <span>To</span>
+                      <input
+                        className="auth-input"
+                        type="date"
+                        value={dateTo}
+                        min={dateFrom || undefined}
+                        onChange={(event) => setDateTo(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                ) : (
+                  <label className="field-stack report-timeframe-year">
+                    <span>Year</span>
+                    <select
+                      className="auth-input"
+                      value={reportYear}
+                      onChange={(event) => setReportYear(event.target.value)}
+                    >
+                      {yearOptions.map((year) => (
+                        <option key={year} value={year}>
+                          {year}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <p className="report-hint">
+                  {reportType === "monthly"
+                    ? "Leave both dates empty to report the latest month available. Pick a range to aggregate across months (dates are rounded to whole months)."
+                    : "Aggregates all 12 months of the selected year, compared against the prior year."}
+                </p>
+              </>
+            )}
+
+            <div className="report-timeframe-group">
+              <h4>Compare against</h4>
+              <div className="report-timeframe-modes report-comparison-presets">
+                {COMPARISON_OPTIONS.map((option) => (
+                  <label key={option.value} className="report-timeframe-mode">
+                    <input
+                      type="checkbox"
+                      checked={comparisons.includes(option.value)}
+                      onChange={() => toggleComparison(option.value)}
+                    />
+                    <span>{option.label}</span>
+                  </label>
+                ))}
+              </div>
+              <p className="report-hint">
+                Pick one or more. Each one becomes a toggle in the client's report, and the first is the
+                comparison the report opens on.
+              </p>
+            </div>
+
+            <button className="ghost-btn" type="button" onClick={() => setUseAdvanced((value) => !value)}>
+              {useAdvanced ? "← Back to the period presets" : "Advanced (custom range / full year)"}
+            </button>
+          </div>
+
           <h3>Select blocks ({selectedKeys.size} selected)</h3>
           {groupedCatalog.map((group) => (
             <div key={group.source} className="report-block-group">
@@ -471,6 +882,49 @@ export default function ReportBuilderPage({ token }: Props) {
               </div>
             </div>
           ))}
+
+          {selectedKeys.has("planned_works") ? (
+            <div className="report-block-group report-planned-work">
+              <h4>Planned work source</h4>
+              <div className="report-timeframe-modes">
+                <label className="report-timeframe-mode">
+                  <input
+                    type="radio"
+                    name="planned-work-mode"
+                    checked={plannedWorkMode === "clickup"}
+                    onChange={() => setPlannedWorkMode("clickup")}
+                  />
+                  <span>From ClickUp (Todo tasks)</span>
+                </label>
+                <label className="report-timeframe-mode">
+                  <input
+                    type="radio"
+                    name="planned-work-mode"
+                    checked={plannedWorkMode === "manual"}
+                    onChange={() => setPlannedWorkMode("manual")}
+                  />
+                  <span>Manual text</span>
+                </label>
+              </div>
+              {plannedWorkMode === "manual" ? (
+                <label className="field-stack">
+                  <span>Plans for the upcoming period</span>
+                  <textarea
+                    className="auth-input"
+                    rows={4}
+                    value={plannedWorkText}
+                    onChange={(event) => setPlannedWorkText(event.target.value)}
+                    placeholder="Describe the planned work for the next period…"
+                  />
+                </label>
+              ) : (
+                <p className="report-hint">
+                  Pulls the tasks currently in the ClickUp &ldquo;Todo&rdquo; status for this client.
+                </p>
+              )}
+            </div>
+          ) : null}
+
           <div className="modal-actions">
             <button
               className="primary-btn"
@@ -495,36 +949,30 @@ export default function ReportBuilderPage({ token }: Props) {
             Report preview — period {generated.period_label}
             {editingReportId ? " (editing saved report)" : ""}
           </h3>
-          {generated.blocks.map((block) => (
-            <div key={block.block_type_key} className="report-preview-block">
-              <div className="report-preview-head">
-                <strong>{displayNameByKey[block.block_type_key] ?? block.block_type_key}</strong>
-                {block.status === "unavailable" ? (
-                  <span className="report-unavailable">⚠ {block.unavailable_reason}</span>
-                ) : (
-                  <span className="report-ok">✓ data loaded</span>
-                )}
-              </div>
-              {block.status === "ok" && block.data ? (
-                <pre className="report-data">{JSON.stringify(block.data, null, 2)}</pre>
-              ) : null}
-              <label className="field-stack">
-                <span>Specialist notes</span>
-                <textarea
-                  className="auth-input"
-                  rows={2}
-                  value={comments[block.block_type_key] ?? ""}
-                  onChange={(event) =>
-                    setComments((current) => ({
-                      ...current,
-                      [block.block_type_key]: event.target.value,
-                    }))
-                  }
-                  placeholder="Add a comment (optional)…"
-                />
-              </label>
+          <p className="report-hint">
+            Edit notes and per-panel settings (size, headings, body text, chart type, accent) directly in the
+            preview below. Sections with no data are excluded automatically. These controls are removed from the
+            client version — your settings and notes are kept when you Save.
+          </p>
+
+          {/* The class toggles on the wrapper, never on the iframe's position in the
+              tree — remounting the iframe would reload it and drop in-preview edits. */}
+          <div className={`report-preview-shell${previewExpanded ? " expanded" : ""}`}>
+            <div className="report-preview-toolbar">
+              <span className="report-hint">
+                {previewExpanded ? "Full screen — press Esc to exit" : "Scroll inside the preview to review the whole report."}
+              </span>
+              <button className="ghost-btn" type="button" onClick={() => setPreviewExpanded((value) => !value)}>
+                {previewExpanded ? "Exit full screen" : "⤢ Full screen"}
+              </button>
             </div>
-          ))}
+            <iframe
+              className="report-preview-frame"
+              title="Report preview"
+              srcDoc={previewHtml}
+            />
+          </div>
+
           <div className="modal-actions">
             <button
               className="primary-btn"
@@ -562,6 +1010,9 @@ export default function ReportBuilderPage({ token }: Props) {
                     <td className="report-saved-actions">
                       <button className="ghost-btn" type="button" onClick={() => void handleOpenReport(report.id)}>
                         Open
+                      </button>
+                      <button className="ghost-btn" type="button" onClick={() => void handlePreview(report.id)}>
+                        Preview
                       </button>
                       <button className="ghost-btn" type="button" onClick={() => void handleExport(report.id)}>
                         Export

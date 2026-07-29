@@ -10,6 +10,11 @@ AI Top Pages — trying known alternate tab names too, since different client
 sheets in practice use slightly different titles for the same data (e.g.
 "GA4 Summary" vs "GA4 Overview", "GA4 Events" vs "GA4 Key Events"). A missing
 sheet, or any read failure, resolves ``unavailable`` (spec FR-006).
+
+Metrics are keyed by monthly ``Period`` label. A report normally covers a single
+month, but a custom range or full-year report aggregates several months at once
+(see :mod:`periods`): additive metrics are summed, rates recomputed from their
+components or session-weighted.
 """
 
 from __future__ import annotations
@@ -17,13 +22,14 @@ from __future__ import annotations
 import typing
 
 from backend.app.report_builder.block_catalog import BlockType
+from backend.app.report_builder.data_sources import periods
 from backend.app.report_builder.data_sources.base import BlockResult, ResolveContext
+from backend.app.report_builder.data_sources.periods import Window, Windows
 from backend.app.report_builder.data_sources.sheets_client import (
     SheetsAccessError,
     fetch_tab_values,
     list_sheet_tabs,
     resolve_client_sheet_id,
-    resolve_periods,
     resolve_tab_name,
     rows_to_dicts,
 )
@@ -39,6 +45,7 @@ _TAB_ALIASES: dict[str, list[str]] = {
     "GA4 Top Pages": ["GA4 Top Pages"],
     "GA4 Ecommerce": ["GA4 Ecommerce"],
     "GA4 Ecommerce Organic": ["GA4 Ecommerce Organic"],
+    "GA4 AI Ecommerce": ["GA4 AI Ecommerce", "GA4 Ecommerce AI"],
     "GA4 AI Summary": ["GA4 AI Summary"],
     "GA4 AI Traffic": ["GA4 AI Traffic"],
     "GA4 AI Top Pages": ["GA4 AI Top Pages"],
@@ -47,16 +54,8 @@ _TAB_ALIASES: dict[str, list[str]] = {
 _TOP_PAGES_LIMIT = 20
 _TOP_EVENTS_LIMIT = 10
 
-
-def _num(value: typing.Optional[str]) -> float:
-    try:
-        return float(str(value).replace(",", "").strip())
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _int(value: typing.Optional[str]) -> int:
-    return int(_num(value))
+_num = periods.num
+_int = periods.to_int
 
 
 def _load_tabs(context: ResolveContext, sheet_id: str) -> dict[str, list[dict[str, str]]]:
@@ -89,75 +88,87 @@ def _load_tabs(context: ResolveContext, sheet_id: str) -> dict[str, list[dict[st
     return parsed
 
 
-def _period_rows(rows: list[dict[str, str]], period_label: typing.Optional[str]) -> list[dict[str, str]]:
-    if not period_label:
-        return []
-    return [row for row in rows if (row.get("Period") or "").strip() == period_label]
-
-
-def _period_row(rows: list[dict[str, str]], period_label: typing.Optional[str]) -> typing.Optional[dict[str, str]]:
-    matches = _period_rows(rows, period_label)
-    return matches[0] if matches else None
-
-
-def _summary_kpi(row: typing.Optional[dict[str, str]]) -> typing.Optional[dict[str, object]]:
-    if row is None:
+def _summary_kpi(rows: list[dict[str, str]]) -> typing.Optional[dict[str, object]]:
+    if not rows:
         return None
+    single = len(rows) == 1
+    sessions = periods.sum_int(rows, "Sessions")
+    engaged = periods.sum_int(rows, "Engaged Sessions")
+    page_views = periods.sum_int(rows, "Page Views")
     return {
-        "sessions": _int(row.get("Sessions")),
-        "organic_sessions": _int(row.get("Organic Sessions")),
-        "total_users": _int(row.get("Total Users")),
-        "new_users": _int(row.get("New Users")),
-        "returning_users": _int(row.get("Returning Users")),
-        "engaged_sessions": _int(row.get("Engaged Sessions")),
-        "engagement_rate": _num(row.get("Engagement Rate %")),
-        "bounce_rate": _num(row.get("Bounce Rate %")),
-        "avg_session_duration_seconds": _num(row.get("Avg Session Duration (s)")),
-        "page_views": _int(row.get("Page Views")),
-        "pages_per_session": _num(row.get("Pages/Session")),
-        "key_events": _int(row.get("Key Events")),
+        "sessions": sessions,
+        "organic_sessions": periods.sum_int(rows, "Organic Sessions"),
+        "total_users": periods.sum_int(rows, "Total Users"),
+        "new_users": periods.sum_int(rows, "New Users"),
+        "returning_users": periods.sum_int(rows, "Returning Users"),
+        "engaged_sessions": engaged,
+        "engagement_rate": (
+            _num(rows[0].get("Engagement Rate %")) if single else periods.ratio_pct(engaged, sessions)
+        ),
+        "bounce_rate": (
+            _num(rows[0].get("Bounce Rate %"))
+            if single
+            else periods.weighted_avg(rows, "Bounce Rate %", "Sessions")
+        ),
+        "avg_session_duration_seconds": (
+            _num(rows[0].get("Avg Session Duration (s)"))
+            if single
+            else periods.weighted_avg(rows, "Avg Session Duration (s)", "Sessions")
+        ),
+        "page_views": page_views,
+        "pages_per_session": (
+            _num(rows[0].get("Pages/Session"))
+            if single
+            else (round(page_views / sessions, 2) if sessions else 0.0)
+        ),
+        "key_events": periods.sum_int(rows, "Key Events"),
     }
 
 
-def _ecommerce_kpi(row: typing.Optional[dict[str, str]]) -> typing.Optional[dict[str, object]]:
-    if row is None:
+def _ecommerce_kpi(rows: list[dict[str, str]]) -> typing.Optional[dict[str, object]]:
+    if not rows:
         return None
     return {
-        "purchases": _int(row.get("Purchases")),
-        "revenue": _num(row.get("Revenue")),
-        "add_to_carts": _int(row.get("Add to Carts")),
-        "checkouts": _int(row.get("Checkouts")),
+        "purchases": periods.sum_int(rows, "Purchases"),
+        "revenue": periods.sum_float(rows, "Revenue"),
+        "add_to_carts": periods.sum_int(rows, "Add to Carts"),
+        "checkouts": periods.sum_int(rows, "Checkouts"),
     }
 
 
-def _ai_summary_kpi(row: typing.Optional[dict[str, str]]) -> typing.Optional[dict[str, object]]:
-    if row is None:
+def _ai_summary_kpi(rows: list[dict[str, str]]) -> typing.Optional[dict[str, object]]:
+    if not rows:
         return None
+    single = len(rows) == 1
+    sessions = periods.sum_int(rows, "Total AI Sessions")
+    engaged = periods.sum_int(rows, "Engaged Sessions")
     return {
-        "total_ai_sessions": _int(row.get("Total AI Sessions")),
-        "engaged_sessions": _int(row.get("Engaged Sessions")),
-        "engagement_rate": _num(row.get("Engagement Rate %")),
+        "total_ai_sessions": sessions,
+        "engaged_sessions": engaged,
+        "engagement_rate": (
+            _num(rows[0].get("Engagement Rate %")) if single else periods.ratio_pct(engaged, sessions)
+        ),
     }
 
 
-def _channel_mix(tabs: dict, period_label: typing.Optional[str]) -> list[dict[str, object]]:
-    rows = _period_rows(tabs.get("GA4 Channels", []), period_label)
+def _channel_mix(tabs: dict, window: Window) -> list[dict[str, object]]:
+    rows = periods.window_rows(tabs.get("GA4 Channels", []), window)
     items = [
         {
-            "channel": row.get("Channel", ""),
-            "sessions": _int(row.get("Sessions")),
-            "engaged_sessions": _int(row.get("Engaged Sessions")),
-            "users": _int(row.get("Users")),
+            "channel": channel,
+            "sessions": periods.sum_int(group, "Sessions"),
+            "engaged_sessions": periods.sum_int(group, "Engaged Sessions"),
+            "users": periods.sum_int(group, "Users"),
         }
-        for row in rows
+        for channel, group in periods.group_by(rows, "Channel").items()
     ]
     items.sort(key=lambda item: item["sessions"], reverse=True)
     return items
 
 
-def _daily_rows(tabs: dict, period_label: typing.Optional[str]) -> list[dict[str, object]]:
-    rows = _period_rows(tabs.get("GA4 Daily", []), period_label)
-    return [
+def _daily_rows(tabs: dict, window: Window) -> list[dict[str, object]]:
+    rows = periods.window_rows(tabs.get("GA4 Daily", []), window)
+    items = [
         {
             "date": row.get("Date", ""),
             "sessions": _int(row.get("Sessions")),
@@ -166,84 +177,106 @@ def _daily_rows(tabs: dict, period_label: typing.Optional[str]) -> list[dict[str
         }
         for row in rows
     ]
+    items.sort(key=lambda item: item["date"])
+    return items
 
 
-def _top_events(tabs: dict, period_label: typing.Optional[str]) -> list[dict[str, object]]:
-    rows = _period_rows(tabs.get("GA4 Events", []), period_label)
+def _top_events(tabs: dict, window: Window) -> list[dict[str, object]]:
+    rows = periods.window_rows(tabs.get("GA4 Events", []), window)
     items = [
         {
-            "event_name": row.get("Event Name", ""),
-            "count": _int(row.get("Count")),
-            "users": _int(row.get("Users")),
+            "event_name": event_name,
+            "count": periods.sum_int(group, "Count"),
+            "users": periods.sum_int(group, "Users"),
         }
-        for row in rows
+        for event_name, group in periods.group_by(rows, "Event Name").items()
     ]
     items.sort(key=lambda item: item["count"], reverse=True)
     return items[:_TOP_EVENTS_LIMIT]
 
 
-def _resolve_summary(tabs: dict, periods: dict) -> BlockResult:
+def _resolve_summary(tabs: dict, windows: Windows) -> BlockResult:
     summary_rows = tabs.get("GA4 Summary", [])
     kpis = {
-        "current": _summary_kpi(_period_row(summary_rows, periods["current"])),
-        "previous": _summary_kpi(_period_row(summary_rows, periods["previous"])),
-        "yoy": _summary_kpi(_period_row(summary_rows, periods["yoy"])),
+        "current": _summary_kpi(periods.window_rows(summary_rows, windows.current)),
+        "previous": _summary_kpi(periods.window_rows(summary_rows, windows.previous)),
+        "yoy": _summary_kpi(periods.window_rows(summary_rows, windows.yoy)),
     }
     return BlockResult.ok(
         {
-            "period": periods["current"],
-            "previous_period": periods["previous"],
-            "yoy_period": periods["yoy"],
+            "period": windows.current.display,
+            "previous_period": windows.previous.display,
+            "yoy_period": windows.yoy.display,
             "kpis": kpis,
-            "channels": _channel_mix(tabs, periods["current"]),
-            "daily": _daily_rows(tabs, periods["current"]),
-            "top_events": _top_events(tabs, periods["current"]),
+            "channels": _channel_mix(tabs, windows.current),
+            "channels_previous": _channel_mix(tabs, windows.previous),
+            "channels_yoy": _channel_mix(tabs, windows.yoy),
+            "daily": _daily_rows(tabs, windows.current),
+            "daily_previous": _daily_rows(tabs, windows.previous),
+            "daily_yoy": _daily_rows(tabs, windows.yoy),
+            "top_events": _top_events(tabs, windows.current),
+            "top_events_previous": _top_events(tabs, windows.previous),
+            "top_events_yoy": _top_events(tabs, windows.yoy),
         }
     )
 
 
-def _resolve_channel_mix_bar(tabs: dict, periods: dict) -> BlockResult:
-    channels = _channel_mix(tabs, periods["current"])
+def _resolve_channel_mix_bar(tabs: dict, windows: Windows) -> BlockResult:
+    channels = _channel_mix(tabs, windows.current)
     if not channels:
-        return BlockResult.unavailable(f"No channel data found for {periods['current']}.")
-    return BlockResult.ok({"period": periods["current"], "channels": channels})
+        return BlockResult.unavailable(f"No channel data found for {windows.current.display}.")
+    return BlockResult.ok({"period": windows.current.display, "channels": channels})
 
 
-def _resolve_top_pages(tabs: dict, periods: dict) -> BlockResult:
-    rows = _period_rows(tabs.get("GA4 Top Pages", []), periods["current"])
+def _resolve_top_pages(tabs: dict, windows: Windows) -> BlockResult:
+    rows = periods.window_rows(tabs.get("GA4 Top Pages", []), windows.current)
     if not rows:
-        return BlockResult.unavailable(f"No top-pages data found for {periods['current']}.")
-    items = [
-        {
-            "page": row.get("Landing Page", ""),
-            "sessions": _int(row.get("Sessions")),
-            "engaged_sessions": _int(row.get("Engaged Sessions")),
-            "key_events": _int(row.get("Key Events")),
-            "bounce_rate": _num(row.get("Bounce Rate %")),
-        }
-        for row in rows
-    ]
+        return BlockResult.unavailable(f"No top-pages data found for {windows.current.display}.")
+    items = []
+    for page, group in periods.group_by(rows, "Landing Page").items():
+        items.append(
+            {
+                "page": page,
+                "sessions": periods.sum_int(group, "Sessions"),
+                "engaged_sessions": periods.sum_int(group, "Engaged Sessions"),
+                "key_events": periods.sum_int(group, "Key Events"),
+                "bounce_rate": (
+                    _num(group[0].get("Bounce Rate %"))
+                    if len(group) == 1
+                    else periods.weighted_avg(group, "Bounce Rate %", "Sessions")
+                ),
+            }
+        )
     items.sort(key=lambda item: item["sessions"], reverse=True)
-    return BlockResult.ok({"period": periods["current"], "pages": items[:_TOP_PAGES_LIMIT]})
+    return BlockResult.ok({"period": windows.current.display, "pages": items[:_TOP_PAGES_LIMIT]})
 
 
-def _resolve_monetization(tabs: dict, periods: dict) -> BlockResult:
+def _resolve_monetization(tabs: dict, windows: Windows) -> BlockResult:
     site_rows = tabs.get("GA4 Ecommerce", [])
     organic_rows = tabs.get("GA4 Ecommerce Organic", [])
+    # AI-driven sales: purchases/revenue attributed to AI-assistant referrers,
+    # read from the client sheet's "GA4 AI Ecommerce" tab. Absent for clients
+    # whose collector doesn't yet populate it — the section then renders empty.
+    ai_rows = tabs.get("GA4 AI Ecommerce", [])
     return BlockResult.ok(
         {
-            "period": periods["current"],
-            "previous_period": periods["previous"],
-            "yoy_period": periods["yoy"],
+            "period": windows.current.display,
+            "previous_period": windows.previous.display,
+            "yoy_period": windows.yoy.display,
             "site_wide": {
-                "current": _ecommerce_kpi(_period_row(site_rows, periods["current"])),
-                "previous": _ecommerce_kpi(_period_row(site_rows, periods["previous"])),
-                "yoy": _ecommerce_kpi(_period_row(site_rows, periods["yoy"])),
+                "current": _ecommerce_kpi(periods.window_rows(site_rows, windows.current)),
+                "previous": _ecommerce_kpi(periods.window_rows(site_rows, windows.previous)),
+                "yoy": _ecommerce_kpi(periods.window_rows(site_rows, windows.yoy)),
             },
             "organic": {
-                "current": _ecommerce_kpi(_period_row(organic_rows, periods["current"])),
-                "previous": _ecommerce_kpi(_period_row(organic_rows, periods["previous"])),
-                "yoy": _ecommerce_kpi(_period_row(organic_rows, periods["yoy"])),
+                "current": _ecommerce_kpi(periods.window_rows(organic_rows, windows.current)),
+                "previous": _ecommerce_kpi(periods.window_rows(organic_rows, windows.previous)),
+                "yoy": _ecommerce_kpi(periods.window_rows(organic_rows, windows.yoy)),
+            },
+            "ai": {
+                "current": _ecommerce_kpi(periods.window_rows(ai_rows, windows.current)),
+                "previous": _ecommerce_kpi(periods.window_rows(ai_rows, windows.previous)),
+                "yoy": _ecommerce_kpi(periods.window_rows(ai_rows, windows.yoy)),
             },
             "note": (
                 "Organic-only figures are read directly from the client sheet's "
@@ -253,19 +286,19 @@ def _resolve_monetization(tabs: dict, periods: dict) -> BlockResult:
     )
 
 
-def _resolve_ai_traffic(tabs: dict, periods: dict) -> BlockResult:
+def _resolve_ai_traffic(tabs: dict, windows: Windows) -> BlockResult:
     summary_rows = tabs.get("GA4 AI Summary", [])
-    tools_rows = _period_rows(tabs.get("GA4 AI Traffic", []), periods["current"])
-    top_pages_rows = _period_rows(tabs.get("GA4 AI Top Pages", []), periods["current"])
+    tools_rows = periods.window_rows(tabs.get("GA4 AI Traffic", []), windows.current)
+    top_pages_rows = periods.window_rows(tabs.get("GA4 AI Top Pages", []), windows.current)
 
     tools = sorted(
         (
             {
-                "source": row.get("Source", ""),
-                "sessions": _int(row.get("Sessions")),
-                "engaged_sessions": _int(row.get("Engaged Sessions")),
+                "source": source,
+                "sessions": periods.sum_int(group, "Sessions"),
+                "engaged_sessions": periods.sum_int(group, "Engaged Sessions"),
             }
-            for row in tools_rows
+            for source, group in periods.group_by(tools_rows, "Source").items()
         ),
         key=lambda item: item["sessions"],
         reverse=True,
@@ -273,11 +306,11 @@ def _resolve_ai_traffic(tabs: dict, periods: dict) -> BlockResult:
     top_pages = sorted(
         (
             {
-                "page": row.get("Landing Page", ""),
-                "sessions": _int(row.get("Sessions")),
-                "engaged_sessions": _int(row.get("Engaged Sessions")),
+                "page": page,
+                "sessions": periods.sum_int(group, "Sessions"),
+                "engaged_sessions": periods.sum_int(group, "Engaged Sessions"),
             }
-            for row in top_pages_rows
+            for page, group in periods.group_by(top_pages_rows, "Landing Page").items()
         ),
         key=lambda item: item["sessions"],
         reverse=True,
@@ -285,13 +318,13 @@ def _resolve_ai_traffic(tabs: dict, periods: dict) -> BlockResult:
 
     return BlockResult.ok(
         {
-            "period": periods["current"],
-            "previous_period": periods["previous"],
-            "yoy_period": periods["yoy"],
+            "period": windows.current.display,
+            "previous_period": windows.previous.display,
+            "yoy_period": windows.yoy.display,
             "summary": {
-                "current": _ai_summary_kpi(_period_row(summary_rows, periods["current"])),
-                "previous": _ai_summary_kpi(_period_row(summary_rows, periods["previous"])),
-                "yoy": _ai_summary_kpi(_period_row(summary_rows, periods["yoy"])),
+                "current": _ai_summary_kpi(periods.window_rows(summary_rows, windows.current)),
+                "previous": _ai_summary_kpi(periods.window_rows(summary_rows, windows.previous)),
+                "yoy": _ai_summary_kpi(periods.window_rows(summary_rows, windows.yoy)),
             },
             "tools": tools,
             "top_pages": top_pages,
@@ -314,18 +347,21 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
     except SheetsAccessError as error:
         return BlockResult.unavailable(str(error))
 
-    periods = resolve_periods(row.get("Period", "") for row in tabs.get("GA4 Summary", []))
-    if not periods.get("current"):
+    windows = periods.resolve_windows(
+        (row.get("Period", "") for row in tabs.get("GA4 Summary", [])),
+        context.period_selection,
+    )
+    if not windows.current.labels:
         return BlockResult.unavailable("Could not determine the current reporting period from the GA4 sheet.")
 
     if block.key == "ga4_summary":
-        return _resolve_summary(tabs, periods)
+        return _resolve_summary(tabs, windows)
     if block.key == "ga4_session_mix_bar":
-        return _resolve_channel_mix_bar(tabs, periods)
+        return _resolve_channel_mix_bar(tabs, windows)
     if block.key == "ga4_top_pages":
-        return _resolve_top_pages(tabs, periods)
+        return _resolve_top_pages(tabs, windows)
     if block.key == "ga4_monetization":
-        return _resolve_monetization(tabs, periods)
+        return _resolve_monetization(tabs, windows)
     if block.key == "ga4_ai_traffic":
-        return _resolve_ai_traffic(tabs, periods)
+        return _resolve_ai_traffic(tabs, windows)
     return BlockResult.unavailable(f"No GA4 resolver for block '{block.key}'.")

@@ -7,10 +7,15 @@ live in the same client sheet as GA4, per README~1.MD §2/§3): GSC Summary /
 Positions / Daily / Queries / Top Pages — trying known alternate tab names too
 ("GSC Summary" vs "GSC Overview", "GSC Queries" vs "GSC Top Queries"), since
 different client sheets in practice use slightly different titles. Branded
-share is computed from the current period's query sample (README's documented
+share is computed from the reporting period's query sample (README's documented
 "top-50 sample" approximation), classifying a query as branded when it
 contains the client's name — an approximation, same as the original template;
 it will not catch every transliteration/spelling variant.
+
+Metrics are keyed by monthly ``Period`` label. A custom range or full-year
+report aggregates several months (see :mod:`periods`): clicks/impressions are
+summed, CTR is recomputed and average position impression-weighted, and the
+position-bucket snapshot uses the window's most recent month.
 """
 
 from __future__ import annotations
@@ -18,13 +23,14 @@ from __future__ import annotations
 import typing
 
 from backend.app.report_builder.block_catalog import BlockType
+from backend.app.report_builder.data_sources import periods
 from backend.app.report_builder.data_sources.base import BlockResult, ResolveContext
+from backend.app.report_builder.data_sources.periods import Window, Windows
 from backend.app.report_builder.data_sources.sheets_client import (
     SheetsAccessError,
     fetch_tab_values,
     list_sheet_tabs,
     resolve_client_sheet_id,
-    resolve_periods,
     resolve_tab_name,
     rows_to_dicts,
 )
@@ -40,16 +46,8 @@ _TAB_ALIASES: dict[str, list[str]] = {
 
 _TOP_LIMIT = 20
 
-
-def _num(value: typing.Optional[str]) -> float:
-    try:
-        return float(str(value).replace(",", "").strip())
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _int(value: typing.Optional[str]) -> int:
-    return int(_num(value))
+_num = periods.num
+_int = periods.to_int
 
 
 def _load_tabs(context: ResolveContext, sheet_id: str) -> dict[str, list[dict[str, str]]]:
@@ -82,25 +80,33 @@ def _load_tabs(context: ResolveContext, sheet_id: str) -> dict[str, list[dict[st
     return parsed
 
 
-def _period_rows(rows: list[dict[str, str]], period_label: typing.Optional[str]) -> list[dict[str, str]]:
-    if not period_label:
-        return []
-    return [row for row in rows if (row.get("Period") or "").strip() == period_label]
-
-
-def _period_row(rows: list[dict[str, str]], period_label: typing.Optional[str]) -> typing.Optional[dict[str, str]]:
-    matches = _period_rows(rows, period_label)
-    return matches[0] if matches else None
-
-
-def _summary_kpi(row: typing.Optional[dict[str, str]]) -> typing.Optional[dict[str, object]]:
-    if row is None:
+def _snapshot_row(rows: list[dict[str, str]], window: Window) -> typing.Optional[dict[str, str]]:
+    """The row for the window's most recent month — for point-in-time snapshots
+    (position buckets) that can't be summed across months."""
+    latest = window.latest
+    if not latest:
         return None
+    for row in rows:
+        if (row.get("Period") or "").strip() == latest:
+            return row
+    return None
+
+
+def _summary_kpi(rows: list[dict[str, str]]) -> typing.Optional[dict[str, object]]:
+    if not rows:
+        return None
+    single = len(rows) == 1
+    clicks = periods.sum_int(rows, "Clicks")
+    impressions = periods.sum_int(rows, "Impressions")
     return {
-        "clicks": _int(row.get("Clicks")),
-        "impressions": _int(row.get("Impressions")),
-        "ctr": _num(row.get("CTR %")),
-        "avg_position": _num(row.get("Avg Position")),
+        "clicks": clicks,
+        "impressions": impressions,
+        "ctr": _num(rows[0].get("CTR %")) if single else periods.ratio_pct(clicks, impressions),
+        "avg_position": (
+            _num(rows[0].get("Avg Position"))
+            if single
+            else periods.weighted_avg(rows, "Avg Position", "Impressions")
+        ),
     }
 
 
@@ -117,9 +123,9 @@ def _positions_kpi(row: typing.Optional[dict[str, str]]) -> typing.Optional[dict
     }
 
 
-def _daily_rows(tabs: dict, period_label: typing.Optional[str]) -> list[dict[str, object]]:
-    rows = _period_rows(tabs.get("GSC Daily", []), period_label)
-    return [
+def _daily_rows(tabs: dict, window: Window) -> list[dict[str, object]]:
+    rows = periods.window_rows(tabs.get("GSC Daily", []), window)
+    items = [
         {
             "date": row.get("Date", ""),
             "clicks": _int(row.get("Clicks")),
@@ -129,6 +135,8 @@ def _daily_rows(tabs: dict, period_label: typing.Optional[str]) -> list[dict[str
         }
         for row in rows
     ]
+    items.sort(key=lambda item: item["date"])
+    return items
 
 
 def _is_branded(query: str, client_name: str) -> bool:
@@ -137,8 +145,8 @@ def _is_branded(query: str, client_name: str) -> bool:
     return bool(normalized_name) and normalized_name in normalized_query
 
 
-def _branded_summary(tabs: dict, period_label: typing.Optional[str], client_name: str) -> dict[str, object]:
-    rows = _period_rows(tabs.get("GSC Queries", []), period_label)
+def _branded_summary(tabs: dict, window: Window, client_name: str) -> dict[str, object]:
+    rows = periods.window_rows(tabs.get("GSC Queries", []), window)
     total_clicks = sum(_int(row.get("Clicks")) for row in rows)
     branded_clicks = sum(
         _int(row.get("Clicks")) for row in rows if _is_branded(row.get("Query", ""), client_name)
@@ -150,62 +158,80 @@ def _branded_summary(tabs: dict, period_label: typing.Optional[str], client_name
         "total_clicks": total_clicks,
         "branded_share_pct": share,
         "sample_size": len(rows),
-        "note": "Computed from the current period's query sample — an approximation, not the full query set.",
+        "note": "Computed from the reporting period's query sample — an approximation, not the full query set.",
     }
 
 
-def _resolve_summary(tabs: dict, periods: dict, client_name: str) -> BlockResult:
+def _aggregate_items(
+    rows: list[dict[str, str]], key_field: str, label_key: str
+) -> list[dict[str, object]]:
+    items = []
+    for key, group in periods.group_by(rows, key_field).items():
+        single = len(group) == 1
+        clicks = periods.sum_int(group, "Clicks")
+        impressions = periods.sum_int(group, "Impressions")
+        items.append(
+            {
+                label_key: key,
+                "clicks": clicks,
+                "impressions": impressions,
+                "ctr": _num(group[0].get("CTR %")) if single else periods.ratio_pct(clicks, impressions),
+                "avg_position": (
+                    _num(group[0].get("Avg Position"))
+                    if single
+                    else periods.weighted_avg(group, "Avg Position", "Impressions")
+                ),
+            }
+        )
+    items.sort(key=lambda item: item["clicks"], reverse=True)
+    return items
+
+
+def _resolve_summary(tabs: dict, windows: Windows, client_name: str) -> BlockResult:
     summary_rows = tabs.get("GSC Summary", [])
     positions_rows = tabs.get("GSC Positions", [])
     return BlockResult.ok(
         {
-            "period": periods["current"],
-            "previous_period": periods["previous"],
-            "yoy_period": periods["yoy"],
+            "period": windows.current.display,
+            "previous_period": windows.previous.display,
+            "yoy_period": windows.yoy.display,
             "kpis": {
-                "current": _summary_kpi(_period_row(summary_rows, periods["current"])),
-                "previous": _summary_kpi(_period_row(summary_rows, periods["previous"])),
-                "yoy": _summary_kpi(_period_row(summary_rows, periods["yoy"])),
+                "current": _summary_kpi(periods.window_rows(summary_rows, windows.current)),
+                "previous": _summary_kpi(periods.window_rows(summary_rows, windows.previous)),
+                "yoy": _summary_kpi(periods.window_rows(summary_rows, windows.yoy)),
             },
             "positions": {
-                "current": _positions_kpi(_period_row(positions_rows, periods["current"])),
-                "previous": _positions_kpi(_period_row(positions_rows, periods["previous"])),
-                "yoy": _positions_kpi(_period_row(positions_rows, periods["yoy"])),
+                "current": _positions_kpi(_snapshot_row(positions_rows, windows.current)),
+                "previous": _positions_kpi(_snapshot_row(positions_rows, windows.previous)),
+                "yoy": _positions_kpi(_snapshot_row(positions_rows, windows.yoy)),
             },
-            "daily": _daily_rows(tabs, periods["current"]),
-            "branded": _branded_summary(tabs, periods["current"], client_name),
+            "daily": _daily_rows(tabs, windows.current),
+            "daily_previous": _daily_rows(tabs, windows.previous),
+            "daily_yoy": _daily_rows(tabs, windows.yoy),
+            "branded": _branded_summary(tabs, windows.current, client_name),
         }
     )
 
 
-def _resolve_branded_bar(tabs: dict, periods: dict, client_name: str) -> BlockResult:
-    branded = _branded_summary(tabs, periods["current"], client_name)
+def _resolve_branded_bar(tabs: dict, windows: Windows, client_name: str) -> BlockResult:
+    branded = _branded_summary(tabs, windows.current, client_name)
     if not branded["total_clicks"]:
-        return BlockResult.unavailable(f"No query click data found for {periods['current']}.")
-    return BlockResult.ok({"period": periods["current"], "branded": branded})
+        return BlockResult.unavailable(f"No query click data found for {windows.current.display}.")
+    return BlockResult.ok({"period": windows.current.display, "branded": branded})
 
 
-def _resolve_top_queries(tabs: dict, periods: dict) -> BlockResult:
-    query_rows = _period_rows(tabs.get("GSC Queries", []), periods["current"])
-    page_rows = _period_rows(tabs.get("GSC Top Pages", []), periods["current"])
+def _resolve_top_queries(tabs: dict, windows: Windows) -> BlockResult:
+    query_rows = periods.window_rows(tabs.get("GSC Queries", []), windows.current)
+    page_rows = periods.window_rows(tabs.get("GSC Top Pages", []), windows.current)
     if not query_rows and not page_rows:
-        return BlockResult.unavailable(f"No query/page data found for {periods['current']}.")
+        return BlockResult.unavailable(f"No query/page data found for {windows.current.display}.")
 
-    def _to_item(row: dict[str, str], label_field: str, label_key: str) -> dict[str, object]:
-        return {
-            label_key: row.get(label_field, ""),
-            "clicks": _int(row.get("Clicks")),
-            "impressions": _int(row.get("Impressions")),
-            "ctr": _num(row.get("CTR %")),
-            "avg_position": _num(row.get("Avg Position")),
-        }
-
-    queries = sorted((_to_item(row, "Query", "query") for row in query_rows), key=lambda item: item["clicks"], reverse=True)
-    pages = sorted((_to_item(row, "Page", "page") for row in page_rows), key=lambda item: item["clicks"], reverse=True)
+    queries = _aggregate_items(query_rows, "Query", "query")
+    pages = _aggregate_items(page_rows, "Page", "page")
 
     return BlockResult.ok(
         {
-            "period": periods["current"],
+            "period": windows.current.display,
             "queries": queries[:_TOP_LIMIT],
             "pages": pages[:_TOP_LIMIT],
         }
@@ -227,15 +253,18 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
     except SheetsAccessError as error:
         return BlockResult.unavailable(str(error))
 
-    periods = resolve_periods(row.get("Period", "") for row in tabs.get("GSC Summary", []))
-    if not periods.get("current"):
+    windows = periods.resolve_windows(
+        (row.get("Period", "") for row in tabs.get("GSC Summary", [])),
+        context.period_selection,
+    )
+    if not windows.current.labels:
         return BlockResult.unavailable("Could not determine the current reporting period from the GSC sheet.")
 
     client_name = context.client.name or ""
     if block.key == "gsc_summary":
-        return _resolve_summary(tabs, periods, client_name)
+        return _resolve_summary(tabs, windows, client_name)
     if block.key == "gsc_branded_bar":
-        return _resolve_branded_bar(tabs, periods, client_name)
+        return _resolve_branded_bar(tabs, windows, client_name)
     if block.key == "gsc_top_queries":
-        return _resolve_top_queries(tabs, periods)
+        return _resolve_top_queries(tabs, windows)
     return BlockResult.unavailable(f"No GSC resolver for block '{block.key}'.")

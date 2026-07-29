@@ -15,6 +15,7 @@ from backend.app.auth import AuthenticatedUser, get_current_user
 from backend.app.db import SessionLocal, get_db_session
 from backend.app.models import Client, Profile
 from backend.app.report_builder import export as report_export
+from backend.app.report_builder import selections_service as report_selections_service
 from backend.app.report_builder import service as report_service
 from backend.app.report_builder import settings_service as report_settings_service
 from backend.app.report_builder.data_sources import clickup_client
@@ -29,9 +30,11 @@ from backend.app.schemas import (
     HistoryForwardRequest,
     HistoryForwardResponse,
     ProfileUpsertRequest,
+    ReportPreviewRequest,
     ReportSaveRequest,
     ReportUpdateRequest,
     RunStartRequest,
+    SelectionSaveRequest,
 )
 from backend.app.service_container import get_run_service
 from backend.app.utils import utcnow
@@ -586,16 +589,42 @@ def generate_report(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> dict[str, object]:
     try:
-        return report_service.generate(
+        result = report_service.generate(
             session,
             client_id=payload.client_id,
             block_keys=payload.block_keys,
             user_id=current_user.user_id,
+            period_preset=payload.period_preset,
+            comparisons=payload.comparisons,
+            comparison=payload.comparison,
+            date_from=payload.date_from,
+            date_to=payload.date_to,
+            report_type=payload.report_type,
+            planned_work_mode=payload.planned_work_mode,
+            planned_work_text=payload.planned_work_text,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    # Persist the starting point so reopening this client restores the checkboxes
+    # and timeframe from the report just generated.
+    try:
+        report_selections_service.save_selection(
+            session,
+            current_user.user_id,
+            payload.client_id,
+            block_keys=payload.block_keys,
+            comparison=payload.comparison,
+            period_preset=payload.period_preset,
+            comparisons=payload.comparisons,
+            report_type=payload.report_type,
+            date_from=payload.date_from,
+            date_to=payload.date_to,
+        )
+    except Exception:  # persistence of the convenience selection must never fail a generate
+        logger.warning("Failed to persist report-builder selection", exc_info=True)
+    return result
 
 
 @router.post("/report-builder/reports", status_code=201)
@@ -611,6 +640,8 @@ def save_report(
             period_label=payload.period_label,
             blocks=[block.model_dump() for block in payload.blocks],
             generated_by=current_user.user_id,
+            default_comparison=payload.default_comparison,
+            customization=payload.customization,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -633,12 +664,67 @@ def update_report(
             period_label=payload.period_label,
             blocks=[block.model_dump() for block in payload.blocks],
             generated_by=current_user.user_id,
+            default_comparison=payload.default_comparison,
+            customization=payload.customization,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     return report_service.serialize_report_summary(report)
+
+
+@router.post("/report-builder/preview")
+def preview_report(
+    payload: ReportPreviewRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
+    """Render a live, client-styled report preview from unsaved blocks +
+    customization, returned as a self-contained HTML document for an iframe."""
+    client = session.get(Client, payload.client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found.")
+    document = report_export.build_preview_html(
+        period_label=payload.period_label,
+        default_comparison=payload.default_comparison,
+        blocks=[block.model_dump() for block in payload.blocks],
+        client_name=client.name,
+        client_domain=client.domain,
+        customization=payload.customization,
+        editable=True,
+    )
+    return Response(content=document, media_type="text/html")
+
+
+@router.get("/report-builder/clients/{client_id}/selection")
+def get_report_selection(
+    client_id: uuid.UUID,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    return report_selections_service.get_selection(session, current_user.user_id, client_id)
+
+
+@router.put("/report-builder/clients/{client_id}/selection")
+def save_report_selection(
+    client_id: uuid.UUID,
+    payload: SelectionSaveRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    return report_selections_service.save_selection(
+        session,
+        current_user.user_id,
+        client_id,
+        block_keys=payload.block_keys,
+        comparison=payload.comparison,
+        period_preset=payload.period_preset,
+        comparisons=payload.comparisons,
+        report_type=payload.report_type,
+        date_from=payload.date_from,
+        date_to=payload.date_to,
+    )
 
 
 @router.get("/report-builder/clients/{client_id}/reports")

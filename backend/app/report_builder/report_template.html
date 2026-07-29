@@ -1,0 +1,969 @@
+<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>OnebyOne — SEO Report — June 2026</title><style>
+:root{
+  /* Rankberry brand palette (rankberry.marketing): berry-pink primary accent,
+     blue secondary, clean white surfaces, rounded corners, soft shadows. */
+  --ink:#1E1633;--muted:#605A70;--faint:#8A8598;--line:#ECE8F2;
+  --bg:#FBFAFD;--bg2:#F4F1F9;--card:#fff;
+  --blue:#2F6BFF;--blue-lt:#EAF0FF;--green:#20B573;--red:#F0436B;
+  --amber:#FBBC04;--purple:#8B4BFF;--teal:#12B5CB;--pink:#E6007A;
+  --navy:#3B0A57;--navy2:#180F42;--accent:#E6007A;
+  --radius:16px;--shadow:0 1px 2px rgba(43,20,64,.06),0 6px 20px rgba(43,20,64,.07);
+  /* customization defaults (overridden per-report via classes / inline vars) */
+  --report-heading-weight:700;--report-body-weight:400;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Arial,sans-serif;
+  font-size:14px;line-height:1.55;font-weight:var(--report-body-weight);-webkit-font-smoothing:antialiased}
+
+/* --- per-panel customization: text size + weight ---
+   Each section carries --sec-scale (size) and the weight vars, set inline by
+   applyCustomization(); sizes are calc()'d so a section scales independently. */
+.block{font-weight:var(--report-body-weight);font-size:calc(14px * var(--sec-scale,1))}
+.block h2.blk-title{font-size:calc(12px * var(--sec-scale,1))}
+.block .sc .val{font-size:calc(24px * var(--sec-scale,1))}
+.block table{font-size:calc(13px * var(--sec-scale,1))}
+.block .chart-title{font-size:calc(13px * var(--sec-scale,1))}
+.block .summary-card{font-size:calc(14.5px * var(--sec-scale,1))}
+.hero h1,.block h2.blk-title,.block .chart-title,.block .sc .val{font-weight:var(--report-heading-weight)}
+
+/* --- edit-mode affordances (preview only; absent from the final report) ---
+   The edit bar sticks *below* the pinned report header (--cb-h is the header's
+   measured height) so the two never overlap while scrolling. */
+.report-editbar{position:sticky;top:var(--cb-h,0px);z-index:60;display:flex;align-items:center;gap:12px;
+  flex-wrap:wrap;background:#fff;border:1px solid var(--line);border-radius:12px;
+  padding:10px 14px;margin:14px 0 6px;box-shadow:var(--shadow);font-size:12.5px}
+.report-editbar .lbl{font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:.05em;font-size:10.5px}
+.report-editbar input[type=color]{width:34px;height:26px;border:1px solid var(--line);border-radius:7px;background:none;cursor:pointer;padding:0}
+.panel-config{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:6px 0 12px;
+  padding:8px 12px;background:var(--bg2);border:1px dashed #C9C2DA;border-radius:10px;font-size:12px}
+.panel-config .pc-item{display:flex;align-items:center;gap:5px;color:var(--muted)}
+.panel-config select{font:inherit;padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
+.panel-config .pc-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--faint);font-weight:700}
+.card-comment.editing .cc-body:focus{outline:none}
+#summary.editing{cursor:text}
+#summary.editing:empty:before{content:attr(data-ph);color:#c9d2ea}
+.wrap{max-width:1120px;margin:0 auto;padding:0 20px 80px}
+a{color:var(--blue);text-decoration:none}
+h2.blk-title{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);
+  font-weight:700;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+h2.blk-title .dot{width:8px;height:8px;border-radius:50%;background:var(--blue)}
+h2.blk-title .scope{margin-left:auto;text-transform:none;letter-spacing:0;font-weight:600;
+  font-size:11px;color:var(--muted);background:var(--bg2);padding:3px 9px;border-radius:6px}
+.block{margin-top:34px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.pad{padding:20px 22px}
+.muted{color:var(--muted)}.faint{color:var(--faint)}
+.up{color:var(--green)}.down{color:var(--red)}
+.small{font-size:12px}
+
+/* The report header stays pinned to the top of the viewport for the whole
+   scroll, so the client always sees who the report is for and which period it
+   covers. Highest z-index of the sticky layers so nothing scrolls over it. */
+.controlbar{position:sticky;top:0;z-index:70;background:rgba(248,249,250,.94);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.controlbar .inner{max-width:1120px;margin:0 auto;padding:10px 20px;display:flex;
+  align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.cb-brand{font-weight:700;font-size:13px;color:var(--ink);display:flex;
+  align-items:baseline;gap:8px;flex-wrap:wrap}
+.cb-brand b{color:var(--accent)}
+.cb-period{font-weight:600;font-size:12px;color:var(--muted);background:var(--bg2);
+  padding:3px 9px;border-radius:6px;white-space:nowrap}
+.cb-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.toggle{display:inline-flex;background:var(--bg2);border-radius:999px;padding:3px}
+.toggle button{border:0;background:transparent;padding:7px 14px;border-radius:999px;
+  font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;transition:.15s}
+.toggle button.on{background:var(--ink);color:#fff;box-shadow:var(--shadow)}
+/* a single chosen comparison has nothing to switch to — it reads as a label */
+.toggle.single button{cursor:default}
+.btn{border:1px solid var(--line);background:#fff;padding:7px 13px;border-radius:9px;
+  font-size:12.5px;font-weight:600;color:var(--ink);cursor:pointer;display:inline-flex;gap:6px;align-items:center}
+.btn:hover{background:var(--bg2)}
+.btn.pri{background:var(--ink);color:#fff;border-color:var(--ink)}
+
+.hero{background:linear-gradient(135deg,var(--navy),var(--navy2));color:#fff;
+  border-radius:20px;padding:34px 36px;margin-top:20px;position:relative;overflow:hidden}
+.hero::after{content:"";position:absolute;inset:0;background-image:
+  linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px);background-size:26px 26px;opacity:.5}
+.hero>*{position:relative}
+.hero .tag{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#8ea0c8;font-weight:700}
+.hero .tag b{color:var(--accent)}
+.hero h1{font-size:34px;line-height:1.15;margin:12px 0 10px;font-weight:800;letter-spacing:-.5px}
+.hero h1 .mo{color:var(--accent)}
+.hero p.lead{color:#c3ccdf;max-width:640px;margin:0 0 22px;font-size:14.5px}
+.hero .meta{display:flex;gap:30px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,.12);padding-top:16px}
+.hero .meta div{font-size:12px;color:#8ea0c8}
+.hero .meta b{display:block;color:#fff;font-size:13.5px;font-weight:600;margin-top:2px}
+
+.scoregrid{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);
+  border-radius:var(--radius);overflow:hidden}
+.sc{background:#fff;padding:15px 16px}
+.sc .lbl{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:700}
+.sc .val{font-size:24px;font-weight:700;margin-top:6px;letter-spacing:-.5px}
+.sc .delta{font-size:12px;margin-top:3px;font-weight:600}
+.sc .sub{font-size:11px;color:var(--faint);margin-top:2px}
+.absd{font-size:10.5px;color:var(--faint);margin-left:5px;font-variant-numeric:tabular-nums;font-weight:600}
+
+.tabs{display:flex;gap:4px;margin-bottom:16px;flex-wrap:wrap}
+.tabs button{border:0;background:transparent;padding:7px 14px;border-radius:999px;
+  font-size:13px;font-weight:600;color:var(--muted);cursor:pointer}
+.tabs button.on{background:var(--blue-lt);color:var(--blue)}
+.tabpane{display:none}.tabpane.on{display:block}
+.pager{display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap}
+.pager button{border:1px solid var(--line);background:#fff;padding:4px 10px;border-radius:7px;
+  font-size:12px;font-weight:600;color:var(--muted);cursor:pointer}
+.pager button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--faint);font-weight:700;padding:9px 10px;border-bottom:1px solid var(--line)}
+td{padding:9px 10px;border-bottom:1px solid var(--bg2);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+th.r,td.r{text-align:right;font-variant-numeric:tabular-nums}
+tbody tr:hover{background:#FBFCFE}
+.kw{color:var(--muted);font-size:12px}
+
+.chip{display:inline-block;font-size:10px;letter-spacing:.04em;font-weight:700;text-transform:uppercase;
+  padding:3px 8px;border-radius:6px}
+.chip.content{background:#E6F4EA;color:#137333}.chip.linkbuilding{background:#E8F0FE;color:#1A57C2}
+.chip.technical{background:#F3E8FD;color:#8430CE}.chip.monitoring{background:#FEF7E0;color:#A8790B}
+.chip.report{background:#FCE8E6;color:#C5221F}.chip.core{background:#FCE8E6;color:#C5221F}
+.chip.spam{background:#FEF7E0;color:#A8790B}.chip.ai{background:#F3E8FD;color:#8430CE}
+.chip.tech{background:#E8F0FE;color:#1A57C2}
+.delta-pill{font-size:11px;font-weight:700;padding:2px 6px;border-radius:5px}
+.delta-pill.up{background:#E6F4EA;color:#137333}.delta-pill.down{background:#FCE8E6;color:#C5221F}
+.delta-pill.flat{background:var(--bg2);color:var(--muted)}
+
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media(max-width:760px){.cols{grid-template-columns:1fr}.hero h1{font-size:26px}}
+.chart-title{font-size:13px;font-weight:700;color:var(--ink);margin:0 0 12px}
+.legend{display:flex;flex-wrap:wrap;gap:10px 18px;margin-top:12px}
+.legend .li{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted)}
+.legend .sw{width:11px;height:11px;border-radius:3px}
+.legend .li b{color:var(--ink);margin-left:auto;font-variant-numeric:tabular-nums}
+.notebox{background:var(--blue-lt);border-left:3px solid var(--blue);border-radius:8px;
+  padding:12px 14px;font-size:13px;color:#174ea6;margin-top:14px}
+.warnbox{background:#FEF7E0;border-left:3px solid var(--amber);border-radius:8px;
+  padding:12px 14px;font-size:13px;color:#7a5b00}
+.txtnote{font-size:12.5px;color:var(--muted);margin-top:12px;padding-top:12px;border-top:1px solid var(--bg2)}
+
+/* comment: attached to the bottom of the section's card, separated by a thin
+   black rule. Rendered only when a comment exists (final) or in edit mode. */
+.card-comment{margin-top:16px;padding-top:14px;border-top:1px solid #202124}
+.card-comment .cc-lbl{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink);font-weight:700;margin-bottom:6px}
+.card-comment .cc-body{font-size:13px;color:var(--ink);white-space:pre-wrap}
+.card-comment .cc-body img{max-width:100%;border-radius:8px;margin:8px 0;display:block}
+/* URLs a specialist pastes into a comment are rendered as real links */
+.card-comment .cc-body a,.summary-card a,.planned-manual a{text-decoration:underline;
+  word-break:break-word;cursor:pointer}
+.summary-card a{color:#7db3ff}
+.card-comment.editing .cc-body{min-height:38px;outline:none;cursor:text}
+.card-comment.editing .cc-body:empty:before{content:attr(data-ph);color:#9aa0a6}
+
+.summary-card{background:linear-gradient(135deg,var(--navy),var(--navy2));color:#e8ecf6;
+  border-radius:16px;padding:26px 30px;font-size:14.5px;line-height:1.7;outline:none}
+.summary-card:focus{box-shadow:0 0 0 3px rgba(125,179,255,.4)}
+.summary-card b{color:#fff}.summary-card .hl{color:#7db3ff;font-weight:600}
+.edit-hint{font-size:11px;color:var(--faint);margin-top:6px}
+.planned-manual{white-space:pre-wrap;font-size:14px;line-height:1.7;color:var(--ink)}
+.foot{margin-top:50px;text-align:center;color:var(--faint);font-size:12px}
+
+@media print{
+  .controlbar{position:static;box-shadow:none}
+  .toggle,.cb-right .btn,.tabs,.pager{display:none!important}
+  .tabpane{display:block!important}
+  body{background:#fff}
+  .block{page-break-inside:avoid}
+  .cmt{border-color:#d0d0d0}
+  .card,.scoregrid{box-shadow:none}
+}
+</style></head><body>
+<div class="controlbar">
+  <div class="inner">
+    <div class="cb-brand">RANKBERRY · <b>{{CLIENT}}</b> SEO Report
+      <span class="cb-period">{{PERIOD_LONG}}</span></div>
+    <div class="cb-right">
+      <!-- one button per comparison the specialist chose; built from DATA.meta.modes -->
+      <div class="toggle" id="modeToggle"></div>
+    </div>
+  </div>
+</div>
+<div class="wrap">
+
+  <section class="hero" id="b1">
+    <div class="tag">RANKBERRY · <b>SEO REPORT</b></div>
+    <h1 id="heroTitle"></h1>
+    <p class="lead">Organic performance, search visibility, authority metrics, AI presence and work completed across {{DOMAIN}}. <span style="color:var(--accent);font-weight:600">Make your business blossom.</span></p>
+    <div class="meta" id="heroMeta"></div>
+  </section>
+
+  <section class="block" id="b14">
+    <h2 class="blk-title"><span class="dot" style="background:var(--accent)"></span>Summary — {{PERIOD_LONG}}</h2>
+    <div class="summary-card" id="summary"></div>
+  </section>
+
+  <section class="block" id="b2">
+    <h2 class="blk-title"><span class="dot"></span>Search industry — {{PERIOD_LONG}}</h2>
+    <div class="card pad" id="industry"></div>
+  </section>
+
+  <section class="block" id="b3">
+    <h2 class="blk-title"><span class="dot" style="background:var(--purple)"></span>Ahrefs — Domain analysis</h2>
+    <div class="scoregrid" id="ahScore" style="grid-template-columns:repeat(4,1fr)"></div>
+    <div class="card pad" style="margin-top:16px">
+      <div class="cols">
+        <div><div class="chart-title">Backlink &amp; authority profile</div>
+          <div class="scoregrid" id="ahProfile" style="grid-template-columns:repeat(2,1fr)"></div></div>
+        <div><div class="chart-title">Organic traffic — 14-month trend (Ahrefs)</div><div id="ahTrend"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="b4">
+    <h2 class="blk-title"><span class="dot" style="background:var(--purple)"></span>Ahrefs — Top movers (pages &amp; keywords)</h2>
+    <div class="card pad">
+      <div class="tabs" data-tabs="ahmove">
+        <button data-t="gain" class="on">▲ Top 20 gainers</button>
+        <button data-t="lose">▼ Top 20 losers</button>
+      </div>
+      <div class="tabpane on" data-p="gain"><div id="ahGain"></div></div>
+      <div class="tabpane" data-p="lose"><div id="ahLose"></div></div>
+    </div>
+  </section>
+
+  <section class="block" id="b5">
+    <h2 class="blk-title"><span class="dot" style="background:var(--amber)"></span>Google Analytics 4</h2>
+    <div class="scoregrid" id="ga4Score" style="grid-template-columns:repeat(6,1fr)"></div>
+    <div class="card pad" style="margin-top:16px">
+      <div class="tabs" data-tabs="ga4">
+        <button data-t="ov" class="on">Overview</button><button data-t="src">Traffic Sources</button>
+        <button data-t="eng">Engagement</button><button data-t="ev">Events</button>
+      </div>
+      <div class="tabpane on" data-p="ov">
+        <div class="chart-title">Daily sessions — <span class="cur-lbl"></span> vs <span class="cmp-lbl"></span></div>
+        <div id="ga4Area"></div><div id="ga4OvTable" style="margin-top:16px"></div>
+      </div>
+      <div class="tabpane" data-p="src"><div class="cols">
+        <div><div class="chart-title">Session mix by channel — <span class="cur-lbl"></span></div><div id="ga4Donut"></div></div>
+        <div><div class="chart-title">Top channels</div><div id="ga4ChTable"></div></div></div></div>
+      <div class="tabpane" data-p="eng">
+        <div class="scoregrid" id="engScore" style="grid-template-columns:repeat(3,1fr)"></div>
+        <div id="engTable" style="margin-top:16px"></div></div>
+      <div class="tabpane" data-p="ev">
+        <div class="chart-title">Top events — <span class="cur-lbl"></span> vs <span class="cmp-lbl"></span></div>
+        <div id="ga4Events"></div></div>
+    </div>
+  </section>
+
+  <section class="block" id="b6">
+    <h2 class="blk-title"><span class="dot" style="background:var(--amber)"></span>GA4 — Top landing pages</h2>
+    <div class="card pad"><div class="pager" id="lpPager"></div><div id="lpTable"></div></div>
+  </section>
+
+  <section class="block" id="b7">
+    <h2 class="blk-title"><span class="dot" style="background:var(--green)"></span>GA4 — Monetization
+      <span class="scope">Scope: all channels (site-wide)</span></h2>
+    <div class="scoregrid" id="ecScore" style="grid-template-columns:repeat(5,1fr)"></div>
+    <div class="card pad" style="margin-top:16px">
+      <div class="cols">
+        <div><div class="chart-title">Purchase funnel — <span class="cur-lbl"></span></div><div id="ecFunnel"></div></div>
+        <div><div class="chart-title">Funnel detail</div><div id="ecTable"></div></div>
+      </div>
+    </div>
+    <div id="aiRevenueWrap" style="margin-top:16px;display:none">
+      <h2 class="blk-title"><span class="dot" style="background:var(--teal)"></span>AI-Revenue
+        <span class="scope">Sales driven by AI assistants</span></h2>
+      <div class="scoregrid" id="aiEcScore" style="grid-template-columns:repeat(4,1fr)"></div>
+      <div class="card pad" style="margin-top:16px"><div id="aiEcTable"></div></div>
+    </div>
+  </section>
+
+  <section class="block" id="b8">
+    <h2 class="blk-title"><span class="dot" style="background:var(--teal)"></span>GA4 — AI Traffic</h2>
+    <div class="scoregrid" id="aiScore" style="grid-template-columns:repeat(4,1fr)"></div>
+    <div class="card pad" style="margin-top:16px">
+      <div class="cols">
+        <div><div class="chart-title">Traffic by AI tool — <span class="cur-lbl"></span></div><div id="aiBars"></div></div>
+        <div><div class="chart-title">Top landing pages from AI</div><div id="aiPages"></div></div>
+      </div>
+      <div class="notebox" id="aiNote"></div>
+    </div>
+  </section>
+
+  <section class="block" id="b9">
+    <h2 class="blk-title"><span class="dot" style="background:var(--red)"></span>Google Search Console</h2>
+    <div class="scoregrid" id="gscScore" style="grid-template-columns:repeat(5,1fr)"></div>
+    <div class="card pad" style="margin-top:16px">
+      <div class="tabs" data-tabs="gsc">
+        <button data-t="ov" class="on">Overview</button><button data-t="pos">Positions</button>
+        <button data-t="brand">Branded traffic</button>
+      </div>
+      <div class="tabpane on" data-p="ov">
+        <div class="chart-title">Daily clicks — <span class="cur-lbl"></span> vs <span class="cmp-lbl"></span></div>
+        <div id="gscArea"></div><div id="gscOvTable" style="margin-top:16px"></div></div>
+      <div class="tabpane" data-p="pos">
+        <div class="chart-title">Keyword position distribution — <span class="cur-lbl"></span> vs <span class="cmp-lbl"></span></div>
+        <div id="gscPos"></div></div>
+      <div class="tabpane" data-p="brand"><div class="cols">
+        <div><div class="chart-title">Branded vs non-branded clicks — <span class="cur-lbl"></span></div><div id="brandDonut"></div></div>
+        <div><div class="chart-title">Branded share trend</div><div id="brandTable"></div></div></div></div>
+    </div>
+  </section>
+
+  <section class="block" id="b10">
+    <h2 class="blk-title"><span class="dot" style="background:var(--red)"></span>GSC — Top queries &amp; pages</h2>
+    <div class="card pad">
+      <div class="tabs" data-tabs="gscq"><button data-t="q" class="on">Top queries</button><button data-t="p">Top pages</button></div>
+      <div class="tabpane on" data-p="q"><div class="pager" id="qPager"></div><div id="qTable"></div></div>
+      <div class="tabpane" data-p="p"><div class="pager" id="gpPager"></div><div id="gpTable"></div></div>
+    </div>
+  </section>
+
+  <section class="block" id="b11">
+    <h2 class="blk-title"><span class="dot" style="background:var(--pink)"></span>SE Ranking — Tracked keywords</h2>
+    <div class="card pad">
+      <div class="warnbox" id="srNote"></div>
+      <div id="srTable" style="margin-top:14px"></div>
+    </div>
+  </section>
+
+  <section class="block" id="b12">
+    <h2 class="blk-title"><span class="dot" style="background:var(--green)"></span>Work completed — {{PERIOD_LONG}}</h2>
+    <div class="card pad"><div id="doneTable"></div></div>
+  </section>
+
+  <section class="block" id="b13">
+    <h2 class="blk-title"><span class="dot"></span>Planned works — {{NEXT_PERIOD_LONG}}</h2>
+    <div class="card pad"><div id="planManual" class="planned-manual" style="display:none"></div><div id="planTable"></div></div>
+  </section>
+
+  <div class="foot"><b style="color:var(--accent)">Rankberry · Make your business blossom</b><br>
+    rankberry.marketing · SEO report for {{DOMAIN}} · data: GA4 · GSC · Ahrefs · ClickUp</div>
+</div>
+<script>window.DATA=__DATA_JSON__;</script><script>
+const P = DATA.meta.P;
+const LBL = DATA.meta.LBL;
+// The comparisons the specialist chose (one toggle each); the first is the one
+// the report opens on.
+const MODES = (DATA.meta.modes && DATA.meta.modes.length) ? DATA.meta.modes : [{id:'mom', label:''}];
+const state = {mode: MODES[0].id};
+const cmp = ()=> state.mode==='mom' ? P.prev : P.yoy;
+
+// --- customization: report-wide accent, per chart-slot variant, per-panel text ---
+const CUS = DATA.customization || {charts:{}, panels:{}, accent:null};
+CUS.charts = CUS.charts || {}; CUS.panels = CUS.panels || {};
+// section-id <-> block-key maps, from the report chrome
+const KEY_BY_SEC = {}, SEC_BY_KEY = {};
+(function(){ const b=(DATA.report&&DATA.report.blocks)||{};
+  Object.keys(b).forEach(sec=>{ const k=b[sec].key; if(k){ KEY_BY_SEC[sec]=k; SEC_BY_KEY[k]=sec; } }); })();
+
+function chartVariant(key, def){ return (CUS.charts && CUS.charts[key]) || def; }
+// optional sub-sections default on (manual toggles removed; no-data hides whole sections)
+function sectionOn(key, def){ return def!==false; }
+
+const _SCALES={small:0.9,normal:1,large:1.14};
+function panelCfg(key){ return (CUS.panels&&CUS.panels[key])||{}; }
+function applyPanelStyle(sec, cfg){
+  const scale = cfg.fontScale || _SCALES[cfg.scale] || 1;
+  sec.style.setProperty('--sec-scale', scale);
+  if(cfg.headingWeight) sec.style.setProperty('--report-heading-weight', cfg.headingWeight);
+  if(cfg.bodyWeight) sec.style.setProperty('--report-body-weight', cfg.bodyWeight);
+}
+function applyCustomization(){
+  if(CUS.accent) document.documentElement.style.setProperty('--accent', CUS.accent);
+  Object.keys(KEY_BY_SEC).forEach(sec=>{
+    const el=document.getElementById(sec); if(el) applyPanelStyle(el, panelCfg(KEY_BY_SEC[sec]));
+  });
+}
+
+const nf = new Intl.NumberFormat('en-US');
+function fnum(n){ return nf.format(Math.round(n)); }
+function fabbr(n){ n=Number(n); const a=Math.abs(n);
+  if(a>=1e6) return (n/1e6).toFixed(a>=1e7?0:1).replace(/\.0$/,'')+'M';
+  if(a>=1e3) return (n/1e3).toFixed(a>=1e4?0:1).replace(/\.0$/,'')+'K'; return fnum(n);}
+function pct(cur,prev){ if(!prev) return null; return (cur-prev)/prev*100; }
+// fix #3: percent + absolute change
+function deltaHTML(cur,prev,opts){ opts=opts||{};
+  const d = pct(cur,prev); if(d===null) return '<span class="faint small">—</span>';
+  const inv = opts.invert; const good = inv ? d<0 : d>0;
+  const cls = Math.abs(d)<0.05?'flat':(good?'up':'down');
+  const abs = cur-prev; const sign = abs>0?'+':(abs<0?'-':'');
+  const absS = sign+fabbr(Math.abs(abs));
+  return `<span class="delta-pill ${cls}">${d>0?'+':''}${d.toFixed(1)}%</span><span class="absd">${absS}</span>`;
+}
+function ppDelta(cur,prev){ const d=(cur-prev); const cls=Math.abs(d)<0.05?'flat':(d>0?'up':'down');
+  return `<span class="delta-pill ${cls}">${d>0?'+':''}${d.toFixed(1)} pp</span>`; }
+function posChange(now,was){ const d=was-now; if(d>0) return `<span class="up">▲ ${d}</span>`;
+  if(d<0) return `<span class="down">▼ ${Math.abs(d)}</span>`; return `<span class="faint">–</span>`;}
+function esc(s){ return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// --- links in specialist comments ---
+// URLs typed or pasted into a note become real, clickable links. The exporter
+// does the same server-side (export.py::_comment_html); this copy keeps the
+// editable preview showing exactly what the client will get.
+const _URL_RE=/\b((?:https?:\/\/|www\.)[^\s<>"']+)/gi;
+const _URL_TRAILING='.,;:!?"\')]}';
+function _anchorHTML(url){
+  let trailing='';
+  while(url && _URL_TRAILING.indexOf(url.charAt(url.length-1))>=0){
+    // a closing bracket that pairs with one inside the URL belongs to the URL
+    if(url.charAt(url.length-1)===')' && url.split('(').length>=url.split(')').length) break;
+    trailing=url.charAt(url.length-1)+trailing; url=url.slice(0,-1);
+  }
+  if(!url) return esc(trailing);
+  const href=/^https?:\/\//i.test(url) ? url : 'https://'+url;
+  return '<a href="'+esc(href).replace(/"/g,'&quot;')+'" target="_blank" rel="noopener noreferrer">'+
+    esc(url)+'</a>'+esc(trailing);
+}
+function linkify(text){
+  text=String(text||''); let out='', last=0;
+  text.replace(_URL_RE, function(match, url, index){
+    out+=esc(text.slice(last, index))+_anchorHTML(url); last=index+match.length; return match; });
+  return (out+esc(text.slice(last))).replace(/\n/g,'<br>');
+}
+// Inside a contenteditable note a plain click would only move the caret, so open
+// the link ourselves while the box is not being edited.
+function openLinksOnClick(host){
+  return function(event){
+    const anchor = event.target.closest && event.target.closest('a');
+    if(anchor && document.activeElement!==host){
+      event.preventDefault(); window.open(anchor.href, '_blank', 'noopener');
+    }
+  };
+}
+
+function areaChart(el, cur, cmpArr, color){
+  color=color||'#1A73E8'; const W=640,H=230,pl=42,pr=14,pt=14,pb=26;
+  const all=cur.concat(cmpArr); const max=Math.max(1,...all); const n=Math.max(cur.length,cmpArr.length);
+  const x=i=> pl + i*(W-pl-pr)/(n-1||1); const y=v=> pt + (H-pt-pb)*(1 - v/max);
+  const path=a=> a.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1)).join(' ');
+  const area = path(cur)+` L ${x(cur.length-1)} ${H-pb} L ${x(0)} ${H-pb} Z`;
+  let grid=''; for(let g=0; g<=4; g++){ const gy=pt+(H-pt-pb)*g/4; const gv=max*(1-g/4);
+    grid+=`<line x1="${pl}" y1="${gy}" x2="${W-pr}" y2="${gy}" stroke="#EEF0F3"/>`+
+          `<text x="${pl-6}" y="${gy+3}" text-anchor="end" font-size="10" fill="#9aa0a6">${fabbr(gv)}</text>`;}
+  let xl=''; const step=Math.ceil(n/6); for(let i=0;i<n;i+=step){ xl+=`<text x="${x(i)}" y="${H-8}" text-anchor="middle" font-size="10" fill="#9aa0a6">${i+1}</text>`;}
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet">${grid}
+    <defs><linearGradient id="ag" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".22"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+    <path d="${area}" fill="url(#ag)"/>
+    <path d="${path(cmpArr)}" fill="none" stroke="#B9C0C9" stroke-width="1.6" stroke-dasharray="4 4"/>
+    <path d="${path(cur)}" fill="none" stroke="${color}" stroke-width="2.4"/>${xl}</svg>
+    <div class="legend"><div class="li"><span class="sw" style="background:${color}"></span>${LBL[P.cur]}</div>
+    <div class="li"><span class="sw" style="background:#B9C0C9"></span>${LBL[cmp()]}</div></div>`;
+}
+const PIE=['#1A73E8','#34A853','#A142F4','#FF6B3D','#12B5CB','#FBBC04','#F439A0','#5F6368','#0B8043','#C5221F'];
+function donut(el, items){
+  const W=230,R=100,r=62,cx=115,cy=115; const tot=items.reduce((s,x)=>s+x.value,0)||1; let a=-Math.PI/2, seg='';
+  items.forEach((it,i)=>{ const ang=it.value/tot*Math.PI*2; const a2=a+ang;
+    const x1=cx+R*Math.cos(a),y1=cy+R*Math.sin(a),x2=cx+R*Math.cos(a2),y2=cy+R*Math.sin(a2);
+    const xi2=cx+r*Math.cos(a2),yi2=cy+r*Math.sin(a2),xi1=cx+r*Math.cos(a),yi1=cy+r*Math.sin(a); const big=ang>Math.PI?1:0;
+    seg+=`<path d="M${x1} ${y1} A${R} ${R} 0 ${big} 1 ${x2} ${y2} L${xi2} ${yi2} A${r} ${r} 0 ${big} 0 ${xi1} ${yi1} Z" fill="${it.color||PIE[i%PIE.length]}"/>`; a=a2;});
+  let leg=items.map((it,i)=>`<div class="li"><span class="sw" style="background:${it.color||PIE[i%PIE.length]}"></span>${esc(it.label)}<b>${(it.value/tot*100).toFixed(1)}%</b></div>`).join('');
+  el.innerHTML=`<div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
+    <svg viewBox="0 0 ${W} ${W}" width="200" height="200">${seg}</svg>
+    <div class="legend" style="flex:1;min-width:180px;flex-direction:column">${leg}</div></div>`;
+}
+function hbars(el, items){
+  const max=Math.max(1,...items.map(i=>Math.max(i.cur,i.prev||0)));
+  let rows=items.map(it=>{ const wc=it.cur/max*100, wp=(it.prev||0)/max*100;
+    return `<div style="margin-bottom:11px"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+      <span class="muted">${esc(it.label)}</span><span style="font-variant-numeric:tabular-nums"><b>${fabbr(it.cur)}</b> <span class="faint">/ ${fabbr(it.prev||0)}</span></span></div>
+      <div style="position:relative;height:14px;background:var(--bg2);border-radius:4px">
+        <div style="position:absolute;height:14px;width:${wp}%;background:#D5DBE2;border-radius:4px"></div>
+        <div style="position:absolute;height:14px;width:${wc}%;background:var(--blue);border-radius:4px"></div></div></div>`;}).join('');
+  el.innerHTML=rows+`<div class="legend"><div class="li"><span class="sw" style="background:var(--blue)"></span>${LBL[P.cur]}</div><div class="li"><span class="sw" style="background:#D5DBE2"></span>${LBL[cmp()]}</div></div>`;
+}
+// single-series horizontal bars (used as a bar alternative to donut/funnel/hbars)
+function barsSimple(el, items){
+  const max=Math.max(1,...items.map(i=>i.value));
+  el.innerHTML=items.map((it,i)=>{ const w=it.value/max*100;
+    return `<div style="margin-bottom:11px"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+      <span class="muted">${esc(it.label)}</span><b style="font-variant-numeric:tabular-nums">${fnum(it.value)}</b></div>
+      <div style="height:16px;background:var(--bg2);border-radius:5px"><div style="height:16px;width:${w}%;background:${it.color||PIE[i%PIE.length]};border-radius:5px"></div></div></div>`;}).join('');
+}
+// compact column chart (bar alternative to the daily area chart)
+function columns(el, cur, cmpArr, color){
+  color=color||'#2F6BFF'; const W=640,H=230,pl=42,pr=14,pt=14,pb=26;
+  const all=cur.concat(cmpArr||[]); const max=Math.max(1,...all); const n=Math.max(1,cur.length);
+  const bw=(W-pl-pr)/n*0.7, gap=(W-pl-pr)/n*0.3; const y=v=> pt + (H-pt-pb)*(1 - v/max);
+  let grid=''; for(let g=0; g<=4; g++){ const gy=pt+(H-pt-pb)*g/4; const gv=max*(1-g/4);
+    grid+=`<line x1="${pl}" y1="${gy}" x2="${W-pr}" y2="${gy}" stroke="#EEF0F3"/>`+
+          `<text x="${pl-6}" y="${gy+3}" text-anchor="end" font-size="10" fill="#9aa0a6">${fabbr(gv)}</text>`;}
+  let bars=cur.map((v,i)=>{ const x=pl+i*(bw+gap); return `<rect x="${x.toFixed(1)}" y="${y(v).toFixed(1)}" width="${bw.toFixed(1)}" height="${(H-pb-y(v)).toFixed(1)}" rx="2" fill="${color}"/>`;}).join('');
+  let xl=''; const step=Math.ceil(n/6); for(let i=0;i<n;i+=step){ const x=pl+i*(bw+gap)+bw/2; xl+=`<text x="${x.toFixed(1)}" y="${H-8}" text-anchor="middle" font-size="10" fill="#9aa0a6">${i+1}</text>`;}
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet">${grid}${bars}${xl}</svg>
+    <div class="legend"><div class="li"><span class="sw" style="background:${color}"></span>${LBL[P.cur]}</div></div>`;
+}
+function funnel(el, stages){
+  const max=Math.max(1,...stages.map(s=>s.value));
+  el.innerHTML=stages.map((s,i)=>{ const w=s.value/max*100;
+    return `<div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">
+      <span class="muted">${esc(s.label)}</span><b style="font-variant-numeric:tabular-nums">${fnum(s.value)}</b></div>
+      <div style="height:22px;background:var(--bg2);border-radius:5px"><div style="height:22px;width:${w}%;background:${PIE[i%4]};border-radius:5px"></div></div></div>`;}).join('');
+}
+// fix #5: readable position distribution — both period values labelled + delta
+function posBars2(el, rows){
+  const max=Math.max(1,...rows.map(r=>Math.max(r.cur,r.prev)));
+  el.innerHTML=rows.map(r=>{ const wc=r.cur/max*100, wp=r.prev/max*100; const d=r.cur-r.prev;
+    const dcls=Math.abs(d)<1?'flat':(d>0?'up':'down');
+    return `<div style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+        <b style="font-size:13px">${r.label}</b>
+        <span class="delta-pill ${dcls}">${d>0?'+':''}${fnum(d)}</span></div>
+      <div style="display:flex;align-items:center;gap:9px;margin-bottom:4px">
+        <div style="flex:1;height:15px;background:var(--bg2);border-radius:4px"><div style="height:15px;width:${wc}%;background:var(--blue);border-radius:4px"></div></div>
+        <span style="width:56px;text-align:right;font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums">${fnum(r.cur)}</span></div>
+      <div style="display:flex;align-items:center;gap:9px">
+        <div style="flex:1;height:15px;background:var(--bg2);border-radius:4px"><div style="height:15px;width:${wp}%;background:#C6CDD6;border-radius:4px"></div></div>
+        <span style="width:56px;text-align:right;font-size:12.5px;color:var(--faint);font-variant-numeric:tabular-nums">${fnum(r.prev)}</span></div>
+    </div>`;}).join('')+
+    `<div class="legend"><div class="li"><span class="sw" style="background:var(--blue)"></span>${LBL[P.cur]}</div><div class="li"><span class="sw" style="background:#C6CDD6"></span>${LBL[cmp()]}</div></div>`;
+}
+function sparkline(el, arr, color){ color=color||'#A142F4'; const W=560,H=170,pt=10,pb=22,pl=40,pr=10;
+  const max=Math.max(...arr.map(a=>a[1])),min=Math.min(...arr.map(a=>a[1]));
+  const x=i=>pl+i*(W-pl-pr)/(arr.length-1); const y=v=>pt+(H-pt-pb)*(1-(v-min)/((max-min)||1));
+  const path=arr.map((a,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(a[1]).toFixed(1)).join(' ');
+  const area=path+` L ${x(arr.length-1)} ${H-pb} L ${x(0)} ${H-pb} Z`;
+  let xl=''; arr.forEach((a,i)=>{ if(i%2===0) xl+=`<text x="${x(i)}" y="${H-6}" text-anchor="middle" font-size="9" fill="#9aa0a6">${a[0].slice(2)}</text>`;});
+  let dots=arr.map((a,i)=>`<circle cx="${x(i)}" cy="${y(a[1])}" r="2.4" fill="${color}"/>`).join('');
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%"><defs><linearGradient id="sg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".2"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+   <path d="${area}" fill="url(#sg)"/><path d="${path}" fill="none" stroke="${color}" stroke-width="2.2"/>${dots}${xl}</svg>`;
+}
+function scEl(lbl,val,delta,sub){ return `<div class="sc"><div class="lbl">${lbl}</div><div class="val">${val}</div>
+  <div class="delta">${delta||''}</div>${sub?`<div class="sub">${sub}</div>`:''}</div>`; }
+// show/hide an optional sub-section (useParent when a chart-title sibling should hide with it)
+function setSection(id, on, useParent){ const el=document.getElementById(id); if(!el) return;
+  (useParent && el.parentElement ? el.parentElement : el).style.display = on ? '' : 'none'; }
+
+function renderIntro(){
+  const m=DATA.meta;
+  document.getElementById('heroTitle').innerHTML=`${m.client} — SEO &amp; Visibility Report — <span class="mo">${m.periodLong}</span>`;
+  document.getElementById('heroMeta').innerHTML=
+    `<div>Client<b>${m.client}</b></div><div>Domain<b>${m.domain}</b></div>
+     <div>Period<b>${m.period}</b></div><div>Prepared<b>${m.prepared}</b></div>`;
+}
+function renderIndustry(){
+  const items=[
+    ['CORE UPDATE','core','June 2026 Core Update — rollout','Fashion e-commerce: category-page uniqueness and content depth were key factors. Thin or duplicated product descriptions were most affected.'],
+    ['SPAM UPDATE','spam','June 2026 Spam Update','Risk areas: templated product descriptions, thin filter pages, back-button hijacking.'],
+    ['AI SEARCH','ai','AI Assistant traffic now measurable in GA4','AI Assistant traffic is now measurable in GA4 — see the GA4 — AI Traffic block for this month\'s figures.'],
+    ['TECHNICAL','tech','Back-button hijacking enforcement','Google applies spam policies to sites that interfere with normal browser back-navigation. Verify no aggressive exit popups.'],
+  ];
+  document.getElementById('industry').innerHTML=`<table><tbody>${items.map(it=>
+    `<tr><td style="width:120px"><span class="chip ${it[1]}">${it[0]}</span></td>
+     <td><b>${it[2]}</b><div class="muted small" style="margin-top:2px">${it[3]}</div></td></tr>`).join('')}</tbody></table>`;
+}
+function renderAhrefs(){
+  const a=DATA.ahrefs, mc=a.metrics[P.cur], mp=a.metrics[cmp()];
+  document.getElementById('ahScore').innerHTML=
+    scEl('Organic traffic', fabbr(mc.orgTraffic), deltaHTML(mc.orgTraffic,mp.orgTraffic), 'Ahrefs est. / mo')+
+    scEl('Organic keywords', fnum(mc.orgKw), deltaHTML(mc.orgKw,mp.orgKw), `Top-3: ${fnum(mc.orgKw13)}`)+
+    scEl('Traffic value', '$'+fabbr(mc.orgCost/100), deltaHTML(mc.orgCost,mp.orgCost), 'organic / mo')+
+    scEl('Domain Rating', a.domainRating.toFixed(0), '<span class="faint small">DR</span>', 'Ahrefs Rank '+fabbr(a.ahrefsRank));
+  const bl=a.backlinks;
+  document.getElementById('ahProfile').innerHTML=
+    scEl('Backlinks', fabbr(bl.live), '', 'all time '+fabbr(bl.allTime))+
+    scEl('Ref. domains', fnum(bl.liveRefdomains), '', 'all time '+fabbr(bl.allTimeRefdomains))+
+    scEl('Paid keywords', fnum(mc.paidKw), deltaHTML(mc.paidKw,mp.paidKw), 'paid pages '+mc.paidPages)+
+    scEl('Paid traffic', fabbr(mc.paidTraffic), deltaHTML(mc.paidTraffic,mp.paidTraffic), 'cost $'+fabbr(mc.paidCost/100));
+  sparkline(document.getElementById('ahTrend'), a.trend, '#A142F4');
+}
+function moverTable(rows){
+  return `<table><thead><tr><th>URL</th><th class="r">Traffic</th><th class="r">Δ</th><th class="r">KW</th>
+    <th>Top keyword</th><th class="r">Vol</th><th class="r">Pos</th></tr></thead><tbody>${
+    rows.map(r=>{ const [url,tr,prev,diff,kw,tk,vol,pos,posPrev]=r; const up=diff>=0;
+    return `<tr><td><a href="https://${DATA.meta.domain}${esc(url)}" target="_blank">${esc(url)}</a></td>
+      <td class="r">${fnum(tr)}</td><td class="r ${up?'up':'down'}">${up?'+':''}${fnum(diff)}</td>
+      <td class="r">${kw}</td><td class="kw">${esc(tk)}</td><td class="r">${fabbr(vol)}</td>
+      <td class="r">${pos} ${posChange(pos,posPrev)}</td></tr>`;}).join('')}</tbody></table>`;
+}
+function renderAhMovers(){ document.getElementById('ahGain').innerHTML=moverTable(DATA.ahrefsGainers);
+  document.getElementById('ahLose').innerHTML=moverTable(DATA.ahrefsLosers); }
+function renderGA4(){
+  const c=DATA.ga4[P.cur], p=DATA.ga4[cmp()];
+  document.getElementById('ga4Score').innerHTML=
+    scEl('Total sessions', fabbr(c.sessions), deltaHTML(c.sessions,p.sessions))+
+    scEl('Organic sessions', fabbr(c.organic), deltaHTML(c.organic,p.organic))+
+    scEl('Engaged sessions', fabbr(c.engaged), deltaHTML(c.engaged,p.engaged))+
+    scEl('Engagement rate', c.engRate.toFixed(1)+'%', ppDelta(c.engRate,p.engRate))+
+    scEl('New users', fabbr(c.newUsers), deltaHTML(c.newUsers,p.newUsers))+
+    scEl('Returning users', fabbr(c.returning), deltaHTML(c.returning,p.returning));
+  const dc=DATA.ga4daily[P.cur].map(d=>d.sessions), dp=(DATA.ga4daily[cmp()]||[]).map(d=>d.sessions);
+  if(chartVariant('ga4_daily','area')==='bars') columns(document.getElementById('ga4Area'), dc, dp, '#2F6BFF');
+  else areaChart(document.getElementById('ga4Area'), dc, dp, '#2F6BFF');
+  document.getElementById('ga4OvTable').innerHTML=
+    `<table><thead><tr><th>Period</th><th class="r">Total</th><th class="r">Organic</th><th class="r">Engaged</th><th class="r">Eng. rate</th></tr></thead><tbody>
+     <tr><td><b>${LBL[P.cur]}</b></td><td class="r">${fnum(c.sessions)}</td><td class="r">${fnum(c.organic)}</td><td class="r">${fnum(c.engaged)}</td><td class="r">${c.engRate.toFixed(1)}%</td></tr>
+     <tr><td class="muted">${LBL[cmp()]}</td><td class="r">${fnum(p.sessions)}</td><td class="r">${fnum(p.organic)}</td><td class="r">${fnum(p.engaged)}</td><td class="r">${p.engRate.toFixed(1)}%</td></tr></tbody></table>`;
+  setSection('ga4OvTable', sectionOn('ga4_overview_table', true));
+  const ch=DATA.channels[P.cur].slice(0,7).map(x=>({label:x.channel,value:x.sessions}));
+  const others=DATA.channels[P.cur].slice(7).reduce((s,x)=>s+x.sessions,0);
+  if(others>0) ch.push({label:'Other',value:others,color:'#DADCE0'});
+  if(chartVariant('ga4_mix','donut')==='bar') barsSimple(document.getElementById('ga4Donut'), ch);
+  else donut(document.getElementById('ga4Donut'), ch);
+  const chP=DATA.channels[cmp()]||[]; const lookC=Object.fromEntries(chP.map(x=>[x.channel,x.sessions]));
+  document.getElementById('ga4ChTable').innerHTML=
+    `<table><thead><tr><th>Channel</th><th class="r">Sessions</th><th class="r">Δ</th><th class="r">Engaged</th></tr></thead><tbody>${
+    DATA.channels[P.cur].slice(0,10).map(x=>`<tr><td>${esc(x.channel)}</td><td class="r">${fnum(x.sessions)}</td>
+      <td class="r">${deltaHTML(x.sessions,lookC[x.channel])}</td><td class="r">${fnum(x.engaged)}</td></tr>`).join('')}</tbody></table>`;
+  document.getElementById('engScore').innerHTML=
+    scEl('Bounce rate', c.bounce.toFixed(1)+'%', ppDelta(c.bounce,p.bounce))+
+    scEl('Avg. session', c.duration.toFixed(0)+'s', deltaHTML(c.duration,p.duration))+
+    scEl('Pages / session', c.pps.toFixed(2), deltaHTML(c.pps,p.pps));
+  document.getElementById('engTable').innerHTML=
+    `<table><thead><tr><th>Metric</th><th class="r">${LBL[P.cur]}</th><th class="r">${LBL[cmp()]}</th><th class="r">Change</th></tr></thead><tbody>
+     ${[['Engagement rate',c.engRate,p.engRate,'%'],['Bounce rate',c.bounce,p.bounce,'%'],['Avg. session duration',c.duration,p.duration,'s'],['Pages / session',c.pps,p.pps,''],['Page views',c.pageViews,p.pageViews,'#'],['Key events',c.keyEvents,p.keyEvents,'#']]
+      .map(r=>{const [n,cv,pv,u]=r; const val=u==='#'?fnum(cv):(u===''?cv.toFixed(2):cv.toFixed(1)+u);
+        const pval=u==='#'?fnum(pv):(u===''?pv.toFixed(2):pv.toFixed(1)+u); const dd=(u==='%')?ppDelta(cv,pv):deltaHTML(cv,pv);
+        return `<tr><td>${n}</td><td class="r">${val}</td><td class="r muted">${pval}</td><td class="r">${dd}</td></tr>`;}).join('')}</tbody></table>`;
+  const ec=DATA.events[P.cur], ep=DATA.events[cmp()]||{};
+  const evNames=Object.entries(ec).sort((a,b)=>b[1].count-a[1].count).slice(0,7);
+  if(chartVariant('ga4_events','bars')==='donut') donut(document.getElementById('ga4Events'), evNames.map(([n,v])=>({label:n,value:v.count})));
+  else hbars(document.getElementById('ga4Events'), evNames.map(([n,v])=>({label:n,cur:v.count,prev:(ep[n]||{}).count||0})));
+}
+function pagedTable(pagerId, tableId, data, buildRow, headHTML, perPage){
+  perPage=perPage||10; const pages=Math.ceil(data.length/perPage);
+  const pager=document.getElementById(pagerId); let cur=0;
+  function draw(){ const slice=data.slice(cur*perPage,(cur+1)*perPage);
+    document.getElementById(tableId).innerHTML=`<table>${headHTML}<tbody>${slice.map((r,i)=>buildRow(r,cur*perPage+i)).join('')}</tbody></table>`;
+    pager.querySelectorAll('button').forEach((b,i)=>b.classList.toggle('on',i===cur)); }
+  pager.innerHTML=''; for(let i=0;i<pages;i++){ const b=document.createElement('button');
+    b.textContent=(i*perPage+1)+'–'+Math.min((i+1)*perPage,data.length); b.onclick=()=>{cur=i;draw();}; pager.appendChild(b);}
+  draw();
+}
+function renderLanding(){
+  const cur=DATA.ga4TopPages[P.cur], prevArr=DATA.ga4TopPages[cmp()]||[];
+  const look=Object.fromEntries(prevArr.map(x=>[x.page,x.sessions]));
+  pagedTable('lpPager','lpTable',cur,(r)=>`<tr><td><a href="https://${DATA.meta.domain}${esc(r.page)}" target="_blank">${esc(r.page)}</a></td>
+    <td class="r">${fnum(r.sessions)}</td><td class="r">${deltaHTML(r.sessions,look[r.page])}</td>
+    <td class="r">${fnum(r.engaged)}</td><td class="r">${r.bounce.toFixed(1)}%</td></tr>`,
+    `<thead><tr><th>Landing page</th><th class="r">Sessions</th><th class="r">vs ${LBL[cmp()]}</th><th class="r">Engaged</th><th class="r">Bounce</th></tr></thead>`);
+}
+function renderEcom(){
+  const c=DATA.ecom[P.cur], p=DATA.ecom[cmp()];
+  const aov=c.purchases?c.revenue/c.purchases:0, aovP=p.purchases?p.revenue/p.purchases:0;
+  const cr=c.checkouts?c.purchases/c.checkouts*100:0, crP=p.checkouts?p.purchases/p.checkouts*100:0;
+  document.getElementById('ecScore').innerHTML=
+    scEl('Number of sales', fnum(c.purchases), deltaHTML(c.purchases,p.purchases))+
+    scEl('Revenue', fabbr(c.revenue)+' ₴', deltaHTML(c.revenue,p.revenue))+
+    scEl('Avg order value', fnum(aov)+' ₴', deltaHTML(aov,aovP))+
+    scEl('Add to cart', fnum(c.addToCart), deltaHTML(c.addToCart,p.addToCart))+
+    scEl('Checkout→Purchase', cr.toFixed(1)+'%', ppDelta(cr,crP));
+  const ecStages=[{label:'Add to cart',value:c.addToCart},{label:'Checkout',value:c.checkouts},{label:'Purchase',value:c.purchases}];
+  if(chartVariant('ecom_funnel','funnel')==='bars') barsSimple(document.getElementById('ecFunnel'), ecStages);
+  else funnel(document.getElementById('ecFunnel'), ecStages);
+  document.getElementById('ecTable').innerHTML=
+    `<table><thead><tr><th>Stage</th><th class="r">${LBL[P.cur]}</th><th class="r">${LBL[cmp()]}</th><th class="r">Change</th></tr></thead><tbody>
+     <tr><td>Add to cart</td><td class="r">${fnum(c.addToCart)}</td><td class="r muted">${fnum(p.addToCart)}</td><td class="r">${deltaHTML(c.addToCart,p.addToCart)}</td></tr>
+     <tr><td>Checkout</td><td class="r">${fnum(c.checkouts)}</td><td class="r muted">${fnum(p.checkouts)}</td><td class="r">${deltaHTML(c.checkouts,p.checkouts)}</td></tr>
+     <tr><td>Number of sales</td><td class="r">${fnum(c.purchases)}</td><td class="r muted">${fnum(p.purchases)}</td><td class="r">${deltaHTML(c.purchases,p.purchases)}</td></tr>
+     <tr><td>Revenue</td><td class="r">${fnum(c.revenue)} ₴</td><td class="r muted">${fnum(p.revenue)} ₴</td><td class="r">${deltaHTML(c.revenue,p.revenue)}</td></tr></tbody></table>`;
+  setSection('ecTable', sectionOn('ecom_detail', true), true);
+  renderAiRevenue();
+}
+// AI-driven sales: purchases/revenue attributed to AI assistants. Hidden when
+// the client sheet has no AI-ecommerce data (all zeros / tab absent).
+function renderAiRevenue(){
+  const wrap=document.getElementById('aiRevenueWrap'); if(!wrap) return;
+  const ai=(DATA.aiEcom&&DATA.aiEcom[P.cur])||null, aip=(DATA.aiEcom&&DATA.aiEcom[cmp()])||{purchases:0,revenue:0,addToCart:0,checkouts:0};
+  const site=DATA.ecom[P.cur]||{revenue:0,purchases:0};
+  const hasData=ai && (ai.purchases||ai.revenue||ai.addToCart||ai.checkouts);
+  if(!hasData){ wrap.style.display='none'; return; }
+  wrap.style.display='block';
+  const aov=ai.purchases?ai.revenue/ai.purchases:0;
+  const revShare=site.revenue?ai.revenue/site.revenue*100:0;
+  const salesShare=site.purchases?ai.purchases/site.purchases*100:0;
+  document.getElementById('aiEcScore').innerHTML=
+    scEl('AI number of sales', fnum(ai.purchases), deltaHTML(ai.purchases,aip.purchases), salesShare.toFixed(2)+'% of all sales')+
+    scEl('AI revenue', fabbr(ai.revenue)+' ₴', deltaHTML(ai.revenue,aip.revenue), revShare.toFixed(2)+'% of all revenue')+
+    scEl('AI avg order value', fnum(aov)+' ₴', '')+
+    scEl('AI add to cart', fnum(ai.addToCart), deltaHTML(ai.addToCart,aip.addToCart));
+  document.getElementById('aiEcTable').innerHTML=
+    `<table><thead><tr><th>Metric</th><th class="r">${LBL[P.cur]}</th><th class="r">${LBL[cmp()]}</th><th class="r">Change</th></tr></thead><tbody>
+     <tr><td>Number of sales</td><td class="r">${fnum(ai.purchases)}</td><td class="r muted">${fnum(aip.purchases)}</td><td class="r">${deltaHTML(ai.purchases,aip.purchases)}</td></tr>
+     <tr><td>Revenue</td><td class="r">${fnum(ai.revenue)} ₴</td><td class="r muted">${fnum(aip.revenue)} ₴</td><td class="r">${deltaHTML(ai.revenue,aip.revenue)}</td></tr>
+     <tr><td>Add to cart</td><td class="r">${fnum(ai.addToCart)}</td><td class="r muted">${fnum(aip.addToCart)}</td><td class="r">${deltaHTML(ai.addToCart,aip.addToCart)}</td></tr>
+     <tr><td>Checkout</td><td class="r">${fnum(ai.checkouts)}</td><td class="r muted">${fnum(aip.checkouts)}</td><td class="r">${deltaHTML(ai.checkouts,aip.checkouts)}</td></tr></tbody></table>`;
+}
+function renderAI(){
+  const c=DATA.aiSummary[P.cur], p=DATA.aiSummary[cmp()]; const ga4c=DATA.ga4[P.cur];
+  const shareTot=ga4c.sessions?c.sessions/ga4c.sessions*100:0; const vsOrg=ga4c.organic?c.sessions/ga4c.organic*100:0;
+  document.getElementById('aiScore').innerHTML=
+    scEl('AI sessions', fnum(c.sessions), p.sessions?deltaHTML(c.sessions,p.sessions):'<span class="delta-pill up">New</span>', 'new channel')+
+    scEl('Engaged', fnum(c.engaged), '', c.engRate.toFixed(1)+'% eng. rate')+
+    scEl('Share of total', shareTot.toFixed(2)+'%', '', 'of all sessions')+
+    scEl('vs organic search', vsOrg.toFixed(1)+'%', '', 'of organic sessions');
+  if(chartVariant('ai_tools','bars')==='donut') donut(document.getElementById('aiBars'), DATA.aiTools.map(t=>({label:t.source,value:t.sessions})));
+  else hbars(document.getElementById('aiBars'), DATA.aiTools.map(t=>({label:t.source,cur:t.sessions,prev:0})));
+  document.getElementById('aiPages').innerHTML=
+    `<table><thead><tr><th>Landing page</th><th class="r">Sessions</th><th class="r">Engaged</th></tr></thead><tbody>${
+    DATA.aiTopPages.slice(0,8).map(x=>`<tr><td><a href="https://${DATA.meta.domain}${esc(x.page)}" target="_blank">${esc(x.page)}</a></td>
+     <td class="r">${fnum(x.sessions)}</td><td class="r">${fnum(x.engaged)}</td></tr>`).join('')}</tbody></table>`;
+  setSection('aiPages', sectionOn('ai_top_pages', true), true);
+  const top=DATA.aiTools[0];
+  document.getElementById('aiNote').innerHTML=`<b>${top?esc(top.source):'ChatGPT'}</b> dominates AI-driven traffic (${top?((top.sessions/c.sessions)*100).toFixed(1):'97.3'}% of AI sessions). Engagement rate ${c.engRate.toFixed(1)}% — AI visitors are highly qualified and intent-driven.`;
+}
+function renderGSC(){
+  const c=DATA.gsc[P.cur], p=DATA.gsc[cmp()]; const pc=DATA.gscPos[P.cur], pp=DATA.gscPos[cmp()];
+  const posD=c.position-p.position; const posCls=posD<0?'up':(posD>0?'down':'flat');
+  document.getElementById('gscScore').innerHTML=
+    scEl('Clicks', fabbr(c.clicks), deltaHTML(c.clicks,p.clicks))+
+    scEl('Impressions', fabbr(c.impressions), deltaHTML(c.impressions,p.impressions))+
+    scEl('Avg position', c.position.toFixed(1), `<span class="delta-pill ${posCls}">${posD>0?'+':''}${posD.toFixed(1)}</span>`, 'lower is better')+
+    scEl('Top-3 keywords', fnum(pc.top3), deltaHTML(pc.top3,pp.top3))+
+    scEl('Top-10 keywords', fnum(pc.top10), deltaHTML(pc.top10,pp.top10));
+  const dc=DATA.gscDaily[P.cur].map(d=>d.clicks), dp=(DATA.gscDaily[cmp()]||[]).map(d=>d.clicks);
+  if(chartVariant('gsc_daily','area')==='bars') columns(document.getElementById('gscArea'), dc, dp, '#F0436B');
+  else areaChart(document.getElementById('gscArea'), dc, dp, '#F0436B');
+  document.getElementById('gscOvTable').innerHTML=
+    `<table><thead><tr><th>Period</th><th class="r">Clicks</th><th class="r">Impressions</th><th class="r">CTR</th><th class="r">Avg pos</th></tr></thead><tbody>
+     <tr><td><b>${LBL[P.cur]}</b></td><td class="r">${fnum(c.clicks)}</td><td class="r">${fnum(c.impressions)}</td><td class="r">${c.ctr.toFixed(2)}%</td><td class="r">${c.position.toFixed(1)}</td></tr>
+     <tr><td class="muted">${LBL[cmp()]}</td><td class="r">${fnum(p.clicks)}</td><td class="r">${fnum(p.impressions)}</td><td class="r">${p.ctr.toFixed(2)}%</td><td class="r">${p.position.toFixed(1)}</td></tr></tbody></table>`;
+  setSection('gscOvTable', sectionOn('gsc_overview_table', true));
+  posBars2(document.getElementById('gscPos'), [
+    {label:'Top-3',cur:pc.top3,prev:pp.top3},{label:'Top-5',cur:pc.top5,prev:pp.top5},
+    {label:'Top-10',cur:pc.top10,prev:pp.top10},{label:'Top-20',cur:pc.top20,prev:pp.top20},
+    {label:'Top-50',cur:pc.top50,prev:pp.top50}]);
+  const b=DATA.branded[P.cur];
+  const brandItems=[{label:'Branded',value:b.branded,color:'#2F6BFF'},{label:'Non-branded',value:Math.max(0,b.total-b.branded),color:'#DADCE0'}];
+  if(chartVariant('gsc_branded','donut')==='bar') barsSimple(document.getElementById('brandDonut'), brandItems);
+  else donut(document.getElementById('brandDonut'), brandItems);
+  document.getElementById('brandTable').innerHTML=
+    `<table><thead><tr><th>Period</th><th class="r">Branded</th><th class="r">Total (top)</th><th class="r">Share</th></tr></thead><tbody>${
+    [P.cur,P.prev,P.yoy].map(k=>{const x=DATA.branded[k];return `<tr><td>${k===P.cur?'<b>'+LBL[k]+'</b>':'<span class="muted">'+LBL[k]+'</span>'}</td>
+      <td class="r">${fnum(x.branded)}</td><td class="r">${fnum(x.total)}</td><td class="r"><b>${x.share}%</b></td></tr>`;}).join('')}</tbody></table>
+      <div class="txtnote">Share computed from the current-period GSC query sample (queries containing the client's brand name).</div>`;
+  setSection('brandTable', sectionOn('branded_trend', true), true);
+}
+function renderGscTables(){
+  const q=DATA.gscQueries[P.cur], qp=DATA.gscQueries[cmp()]||[]; const ql=Object.fromEntries(qp.map(x=>[x.query,x]));
+  pagedTable('qPager','qTable',q,(r)=>{const pr=ql[r.query];
+    return `<tr><td>${esc(r.query)}</td><td class="r">${fnum(r.clicks)}</td><td class="r">${deltaHTML(r.clicks,pr&&pr.clicks)}</td>
+     <td class="r">${fnum(r.impressions)}</td><td class="r">${r.ctr.toFixed(1)}%</td><td class="r">${r.position.toFixed(1)}${pr?' '+posChange(Math.round(r.position),Math.round(pr.position)):''}</td></tr>`;},
+    `<thead><tr><th>Query</th><th class="r">Clicks</th><th class="r">Δ</th><th class="r">Impr.</th><th class="r">CTR</th><th class="r">Pos</th></tr></thead>`);
+  const g=DATA.gscTopPages[P.cur], gpp=DATA.gscTopPages[cmp()]||[]; const gl=Object.fromEntries(gpp.map(x=>[x.page,x]));
+  pagedTable('gpPager','gpTable',g,(r)=>{const pr=gl[r.page];
+    return `<tr><td><a href="${esc(r.page)}" target="_blank">${esc(r.page.replace('https://'+DATA.meta.domain,''))||'/'}</a></td>
+     <td class="r">${fnum(r.clicks)}</td><td class="r">${deltaHTML(r.clicks,pr&&pr.clicks)}</td>
+     <td class="r">${fnum(r.impressions)}</td><td class="r">${r.ctr.toFixed(1)}%</td><td class="r">${r.position.toFixed(1)}</td></tr>`;},
+    `<thead><tr><th>Page</th><th class="r">Clicks</th><th class="r">Δ</th><th class="r">Impr.</th><th class="r">CTR</th><th class="r">Pos</th></tr></thead>`);
+}
+function renderSER(){
+  document.getElementById('srNote').innerHTML='⚠ '+esc(DATA.seranking.note);
+  document.getElementById('srTable').innerHTML=
+    `<table><thead><tr><th>Keyword</th><th class="r">Volume</th><th class="r">Position</th><th class="r">vs prev month</th></tr></thead><tbody>${
+    DATA.seranking.keywords.map(k=>`<tr><td>${esc(k[0])}</td><td class="r">${fnum(k[1])}</td><td class="r">${k[2]}</td>
+     <td class="r">${posChange(k[2],k[3])}</td></tr>`).join('')}</tbody></table>`;
+}
+function taskTable(id, rows){
+  // rows: [summary, task, task_id] — Summary leads with a brief description.
+  document.getElementById(id).innerHTML=
+    `<table><thead><tr><th>Summary</th><th>Task</th><th>ID</th></tr></thead><tbody>${
+    rows.map(r=>`<tr><td>${esc(r[0])}</td><td class="muted">${esc(r[1])}</td>
+     <td><a href="https://app.clickup.com/t/${r[2]}" target="_blank" class="small">${r[2]}</a></td></tr>`).join('')}</tbody></table>`;
+}
+function renderPlanned(){
+  const manual=DATA.workPlannedManual||'';
+  const mEl=document.getElementById('planManual'), tEl=document.getElementById('planTable');
+  if(manual){ mEl.innerHTML=manual; mEl.style.display='block'; tEl.style.display='none'; return; }
+  mEl.style.display='none'; tEl.style.display='';
+  taskTable('planTable', DATA.workPlanned||[]);
+}
+function renderSummary(){
+  const el=document.getElementById('summary');
+  // keep whatever the specialist has typed in the preview when the comparison
+  // toggle triggers a re-render
+  if(el.dataset.touched==='1') return;
+  const cmt=(DATA.report&&DATA.report.comments&&DATA.report.comments.b14)||'';
+  if(cmt){ el.innerHTML=cmt; return; }
+  const m=DATA.meta;
+  const g4=(DATA.ga4&&DATA.ga4[P.cur])||null, gs=(DATA.gsc&&DATA.gsc[P.cur])||null,
+        ai=(DATA.aiSummary&&DATA.aiSummary[P.cur])||null, ec=(DATA.ecom&&DATA.ecom[P.cur])||null;
+  let parts=[`<b>${esc(m.client)}</b> — performance summary for <span class="hl">${esc(m.periodLong)}</span>.`];
+  if(g4) parts.push(` Total sessions <span class="hl">${fnum(g4.sessions)}</span>, organic <span class="hl">${fnum(g4.organic)}</span>, engagement <span class="hl">${g4.engRate.toFixed(1)}%</span>.`);
+  if(ai&&ai.sessions) parts.push(` AI Assistant sessions: <b>${fnum(ai.sessions)}</b> at ${ai.engRate.toFixed(1)}% engagement.`);
+  if(gs) parts.push(` Search Console clicks <b>${fnum(gs.clicks)}</b>, avg position ${gs.position.toFixed(1)}.`);
+  if(ec) parts.push(` Commerce: <b>${fnum(ec.purchases)}</b> sales, <b>${fabbr(ec.revenue)}</b> revenue (all channels).`);
+  el.innerHTML=parts.join('');
+}
+function paintLabels(){
+  document.querySelectorAll('.cur-lbl').forEach(e=>e.textContent=LBL[P.cur]);
+  document.querySelectorAll('.cmp-lbl').forEach(e=>e.textContent=LBL[cmp()]);
+}
+const SECRENDER={b1:renderIntro,b2:renderIndustry,b3:renderAhrefs,b4:renderAhMovers,b5:renderGA4,b6:renderLanding,b7:renderEcom,b8:renderAI,b9:renderGSC,b10:renderGscTables,b11:renderSER,b12:()=>taskTable('doneTable',DATA.workDone||[]),b13:renderPlanned,b14:renderSummary};
+function blockState(secId){ return (DATA.report&&DATA.report.blocks&&DATA.report.blocks[secId])||null; }
+function applyReportChrome(){
+  if(!DATA.report) return;
+  Object.keys(SECRENDER).forEach(secId=>{
+    const sec=document.getElementById(secId); if(!sec) return;
+    const st=blockState(secId);
+    if(!st||!st.selected){ sec.style.display='none'; return; }
+    if(st.status!=='ok'){
+      // A section with no data is dropped from the report entirely. In the
+      // editable preview we keep a slim muted strip so the specialist knows it
+      // was excluded; the final client report omits it outright.
+      if(DATA.editable){
+        sec.querySelectorAll('.scoregrid,.card,.panel-config').forEach(el=>el.remove());
+        const w=document.createElement('div'); w.className='warnbox'; w.style.marginTop='10px';
+        w.textContent='No data — this section is excluded from the client report.'+(st.reason?' ('+st.reason+')':'');
+        const t=sec.querySelector('.blk-title'); if(t) t.insertAdjacentElement('afterend',w);
+        sec.style.opacity='.55';
+      } else {
+        sec.style.display='none';
+      }
+      return;
+    }
+    // Non-edit (final): attach the comment inside the section's card when one
+    // exists, so the client version has no blank placeholders.
+    if(!DATA.editable && secId!=='b14'){ const c=(DATA.report.comments||{})[secId];
+      if(c) attachComment(sec, secId, null, c, false); }
+  });
+}
+// A section's comment lives at the bottom of its last visible card, separated by
+// a thin rule and labelled "Comment".
+function sectionCard(sec){
+  const cards=Array.prototype.filter.call(sec.querySelectorAll('.card'), function(c){
+    let el=c; while(el && el!==sec){ if(el.style && el.style.display==='none') return false; el=el.parentElement; }
+    return true;
+  });
+  return cards.length ? cards[cards.length-1] : null;
+}
+function attachComment(sec, secId, key, html, editable){
+  const card=sectionCard(sec); if(!card) return;
+  let cc=card.querySelector(':scope > .card-comment');
+  if(!cc){ cc=document.createElement('div'); cc.className='card-comment'; card.appendChild(cc); }
+  cc.innerHTML='<div class="cc-lbl">Comment</div><div class="cc-body"></div>';
+  const body=cc.querySelector('.cc-body');
+  if(editable){
+    cc.classList.add('editing');
+    body.setAttribute('contenteditable','true');
+    body.setAttribute('data-ph','Add a comment… pasted links become clickable (empty = hidden in the client report)');
+    // Editing works on plain text; once the box loses focus the note is redrawn
+    // with live links, so the specialist sees what the client will get.
+    let raw=(DATA.report.commentsRaw||{})[secId]||'';
+    body.innerHTML=linkify(raw);
+    body.addEventListener('focus',function(){ body.textContent=raw; });
+    body.addEventListener('blur',function(){ raw=body.innerText; body.innerHTML=linkify(raw); });
+    body.addEventListener('input',function(){ raw=body.innerText; postToParent('note', key, raw); });
+    body.addEventListener('mousedown', openLinksOnClick(body));
+  } else {
+    body.innerHTML=html||'';
+  }
+}
+function renderAll(){ paintLabels();
+  Object.keys(SECRENDER).forEach(secId=>{ const st=blockState(secId);
+    if(st&&st.selected&&st.status==='ok'){ try{ SECRENDER[secId](); }catch(e){ console.error('render '+secId,e); } }});
+}
+function wireTabs(){
+  document.querySelectorAll('[data-tabs]').forEach(group=>{ const scope=group.parentElement;
+    group.querySelectorAll('button').forEach(btn=>{ btn.onclick=()=>{
+      group.querySelectorAll('button').forEach(b=>b.classList.remove('on')); btn.classList.add('on');
+      scope.querySelectorAll('.tabpane').forEach(pn=>pn.classList.toggle('on', pn.dataset.p===btn.dataset.t));};});});
+}
+// The comparison toggle lets the client switch between the comparisons the
+// specialist picked (one button each). With a single comparison it is just a
+// label — there is nothing to switch to.
+function initModeToggle(){
+  const box=document.getElementById('modeToggle'); if(!box) return;
+  box.innerHTML=MODES.map(m=>'<button data-mode="'+esc(m.id)+'"'+
+    (m.id===state.mode?' class="on"':'')+'>'+esc(m.label||m.id.toUpperCase())+'</button>').join('');
+  box.classList.toggle('single', MODES.length<2);
+}
+// The pinned report header overlaps anything else stuck to the top of the
+// viewport, so publish its height for the edit bar to offset against.
+function syncHeaderOffset(){
+  const bar=document.querySelector('.controlbar'); if(!bar) return;
+  document.documentElement.style.setProperty('--cb-h', bar.offsetHeight+'px');
+}
+function renderOne(secId){ const st=blockState(secId);
+  if(st&&st.selected&&st.status==='ok'){ try{ SECRENDER[secId](); paintLabels(); }catch(e){ console.error('render '+secId,e); } } }
+
+// --- edit mode: in-panel note editors + per-panel config toolbars (preview only) ---
+const CHART_SLOTS=[
+ {key:"ga4_daily", block:"ga4_summary", label:"Daily trend", options:[["area","Area"],["bars","Bars"]]},
+ {key:"ga4_mix", block:"ga4_summary", label:"Session mix", options:[["donut","Donut"],["bar","Bar"]]},
+ {key:"ga4_events", block:"ga4_summary", label:"Top events", options:[["bars","Bars"],["donut","Donut"]]},
+ {key:"ecom_funnel", block:"ga4_monetization", label:"Funnel", options:[["funnel","Funnel"],["bars","Bars"]]},
+ {key:"ai_tools", block:"ga4_ai_traffic", label:"By tool", options:[["bars","Bars"],["donut","Donut"]]},
+ {key:"gsc_daily", block:"gsc_summary", label:"Daily clicks", options:[["area","Area"],["bars","Bars"]]},
+ {key:"gsc_branded", block:"gsc_summary", label:"Branded split", options:[["donut","Donut"],["bar","Bar"]]},
+];
+function postToParent(kind, key, value){
+  try{ if(window.parent && window.parent!==window) window.parent.postMessage({source:'report-preview', kind:kind, key:key, value:value}, '*'); }catch(e){}
+}
+function _opts(opts, cur){ return opts.map(o=>'<option value="'+o[0]+'"'+(o[0]===cur?' selected':'')+'>'+o[1]+'</option>').join(''); }
+function buildEditBar(){
+  const wrap=document.querySelector('.wrap'); if(!wrap) return;
+  const bar=document.createElement('div'); bar.className='report-editbar';
+  bar.innerHTML='<span class="lbl">Editing preview</span><span class="pc-lbl">Accent</span>';
+  const color=document.createElement('input'); color.type='color'; color.value=(CUS.accent||'#E6007A');
+  color.addEventListener('input',()=>{ CUS.accent=color.value;
+    document.documentElement.style.setProperty('--accent', color.value); renderAll(); postToParent('accent', null, color.value); });
+  bar.appendChild(color);
+  const hint=document.createElement('span'); hint.style.color='var(--faint)';
+  hint.textContent='Per-panel settings & notes here are saved and removed from the client version.';
+  bar.appendChild(hint);
+  wrap.insertBefore(bar, wrap.firstChild);
+}
+function buildPanelToolbar(sec, secId, key){
+  const cfg=panelCfg(key);
+  const tb=document.createElement('div'); tb.className='panel-config';
+  tb.innerHTML='<span class="pc-lbl">Panel</span>'+
+    '<span class="pc-item"><span class="pc-lbl">Size</span><select data-k="scale">'+_opts([["small","S"],["normal","M"],["large","L"]], cfg.scale||"normal")+'</select></span>'+
+    '<span class="pc-item"><span class="pc-lbl">Head</span><select data-k="headingWeight">'+_opts([["bold","Bold"],["normal","Normal"]], (cfg.headingWeight==='400'?'normal':'bold'))+'</select></span>'+
+    '<span class="pc-item"><span class="pc-lbl">Body</span><select data-k="bodyWeight">'+_opts([["normal","Normal"],["bold","Bold"]], (cfg.bodyWeight==='700'?'bold':'normal'))+'</select></span>';
+  tb.querySelectorAll('select[data-k]').forEach(sel=>{
+    sel.addEventListener('change',()=>{
+      const c=panelCfg(key);
+      const next={scale:c.scale||'normal', headingWeight:c.headingWeight||'700', bodyWeight:c.bodyWeight||'400'};
+      const k=sel.dataset.k;
+      if(k==='scale') next.scale=sel.value;
+      if(k==='headingWeight') next.headingWeight = sel.value==='bold'?'700':'400';
+      if(k==='bodyWeight') next.bodyWeight = sel.value==='bold'?'700':'400';
+      CUS.panels[key]=next; applyPanelStyle(sec, next);
+      postToParent('panel', key, {scale:next.scale,
+        headingWeight: next.headingWeight==='700'?'bold':'normal',
+        bodyWeight: next.bodyWeight==='700'?'bold':'normal'});
+    });
+  });
+  CHART_SLOTS.filter(s=>s.block===key).forEach(s=>{
+    const cur=chartVariant(s.key, s.options[0][0]);
+    const span=document.createElement('span'); span.className='pc-item';
+    span.innerHTML='<span class="pc-lbl">'+s.label+'</span>';
+    const sel=document.createElement('select'); sel.innerHTML=_opts(s.options, cur);
+    sel.addEventListener('change',()=>{ CUS.charts[s.key]=sel.value; renderOne(secId); postToParent('chart', s.key, sel.value); });
+    span.appendChild(sel); tb.appendChild(span);
+  });
+  const title=sec.querySelector('.blk-title'); if(title) title.insertAdjacentElement('afterend', tb);
+}
+function enableSummaryEdit(){
+  const el=document.getElementById('summary'); if(!el) return;
+  el.setAttribute('contenteditable','true'); el.classList.add('editing');
+  el.setAttribute('data-ph','Write the summary… pasted links become clickable');
+  el.addEventListener('input',()=>{
+    // mark it edited so switching comparison does not redraw over the new text
+    el.dataset.touched='1'; postToParent('note', 'summary', el.innerText);
+  });
+  el.addEventListener('blur',()=>{ if(el.dataset.touched==='1') el.innerHTML=linkify(el.innerText); });
+  el.addEventListener('focus',()=>{ if(el.dataset.touched==='1') el.textContent=el.innerText; });
+  el.addEventListener('mousedown', openLinksOnClick(el));
+}
+function applyEditMode(){
+  if(!DATA.editable) return;
+  buildEditBar();
+  Object.keys(SECRENDER).forEach(secId=>{
+    if(secId==='b1') return;
+    const sec=document.getElementById(secId); if(!sec) return;
+    const st=blockState(secId); if(!st||!st.selected||st.status!=='ok') return;
+    const key=KEY_BY_SEC[secId]; if(!key) return;
+    buildPanelToolbar(sec, secId, key);
+    if(secId==='b14') enableSummaryEdit(); else attachComment(sec, secId, key, null, true);
+  });
+}
+document.getElementById('modeToggle').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return;
+  if(b.dataset.mode===state.mode) return;
+  state.mode=b.dataset.mode; document.querySelectorAll('#modeToggle button').forEach(x=>x.classList.toggle('on',x===b)); renderAll();});
+window.addEventListener('resize', syncHeaderOffset);
+applyCustomization(); initModeToggle(); renderAll(); applyReportChrome(); wireTabs(); applyEditMode();
+syncHeaderOffset();
+</script></body></html>

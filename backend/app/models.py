@@ -128,12 +128,53 @@ class UserSettings(Base):
     )
 
 
+class ReportSelection(Base):
+    """The last-used block selection and timeframe for a (user, client) pair, so
+    reopening a client's report starting point restores the previous checkboxes.
+    """
+
+    __tablename__ = "Dashboard_ReportBuilder_selections"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    client_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    block_keys: Mapped[str] = mapped_column(Text, nullable=False, default="[]", server_default="[]")
+    report_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="monthly", server_default="monthly"
+    )
+    date_from: Mapped[typing.Optional[str]] = mapped_column(Text)
+    date_to: Mapped[typing.Optional[str]] = mapped_column(Text)
+    # The last-used comparison preset key (e.g. "last_month_vs_prev"); None when
+    # the specialist used the Advanced custom-range / full-year controls instead.
+    comparison: Mapped[typing.Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
 class Report(Base):
     __tablename__ = "Dashboard_ReportBuilder_reports"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     client_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     period_label: Mapped[str] = mapped_column(Text, nullable=False)
+    # Which comparison the exported report opens on: "mom" or "yoy". Set from the
+    # chosen comparison preset at generate time (defaults to "mom").
+    # Comma-separated list of the comparisons the report offers ("mom", "yoy"),
+    # the first being the one it opens on. Single values predate multi-select.
+    default_comparison: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="mom", server_default="mom"
+    )
+    # JSON blob of report customization (accent, text style, per-block chart
+    # variants, section visibility). None means "template defaults".
+    customization: Mapped[typing.Optional[str]] = mapped_column(Text)
     generated_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow

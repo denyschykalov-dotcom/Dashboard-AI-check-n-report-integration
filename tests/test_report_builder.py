@@ -2,7 +2,7 @@ import os
 import unittest
 import uuid
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
@@ -13,11 +13,15 @@ from backend.app.db import Base, build_engine
 from backend.app.models import Client, Report, ReportBlock, Run, RunResult
 from backend.app.report_builder import export as report_export
 from backend.app.report_builder import secrets_crypto
+from backend.app.report_builder import selections_service
 from backend.app.report_builder import service as report_service
 from backend.app.report_builder import settings_service
+from backend.app.report_builder.data_sources import periods
+from backend.app.report_builder.data_sources.periods import PeriodSelection
 from backend.app.report_builder.block_catalog import BLOCK_CATALOG, get_block
 from backend.app.report_builder.data_sources import ahrefs, ai_visibility, clickup, ga4, gsc, static_editorial
 from backend.app.report_builder.data_sources.ahrefs_client import AhrefsAccessError, resolve_report_dates
+from backend.app.report_builder.data_sources import clickup_client as clickup_client_module
 from backend.app.report_builder.data_sources.clickup_client import ClickUpAccessError, find_client_list
 from backend.app.report_builder.data_sources.base import ResolveContext
 from backend.app.report_builder.data_sources.sheets_client import (
@@ -184,6 +188,12 @@ def _ga4_sheet_fixture() -> dict[str, list[list[str]]]:
             ["May 2026", "171", "613939.9701", "1612", "596", "Organic Search"],
             ["Jun 2025", "201", "761002.3602", "1818", "772", "Organic Search"],
         ],
+        "GA4 AI Ecommerce": [
+            ["Period", "Purchases", "Revenue", "Add to Carts", "Checkouts"],
+            ["Jun 2026", "42", "185000.50", "260", "70"],
+            ["May 2026", "31", "121000.00", "180", "55"],
+            ["Jun 2025", "5", "12000.00", "40", "9"],
+        ],
         "GA4 AI Summary": [
             ["Period", "Total AI Sessions", "Engaged Sessions", "Engagement Rate %"],
             ["Jun 2026", "1057", "986", "93.3"],
@@ -317,6 +327,23 @@ class GA4SheetResolverTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.data["site_wide"]["current"]["purchases"], 6058)
         self.assertEqual(result.data["organic"]["current"]["purchases"], 107)
+
+    def test_monetization_includes_ai_driven_sales(self) -> None:
+        with _patched_ga4_sheet():
+            result = ga4.resolve(get_block("ga4_monetization"), self._context())
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.data["ai"]["current"]["purchases"], 42)
+        self.assertAlmostEqual(result.data["ai"]["current"]["revenue"], 185000.50)
+        self.assertEqual(result.data["ai"]["previous"]["purchases"], 31)
+        self.assertEqual(result.data["ai"]["yoy"]["purchases"], 5)
+
+    def test_monetization_ai_section_empty_when_tab_absent(self) -> None:
+        fixture = _ga4_sheet_fixture()
+        fixture.pop("GA4 AI Ecommerce")
+        with _patched_ga4_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = ga4.resolve(get_block("ga4_monetization"), self._context())
+        self.assertEqual(result.status, "ok")
+        self.assertIsNone(result.data["ai"]["current"])
 
     def test_ai_traffic_includes_summary_tools_and_top_pages(self) -> None:
         with _patched_ga4_sheet():
@@ -603,6 +630,38 @@ class ServiceGenerateWithSheetsTests(unittest.TestCase):
             result = report_service.generate(session, client_id=client.id, block_keys=["ga4_summary"])
         self.assertEqual(result["period_label"], "Jun 2026")
 
+    def test_generate_propagates_sheet_period_to_later_blocks(self) -> None:
+        # ga4_summary resolves before work_completed in catalog order, so once
+        # GA4 reports the real period ("Jun 2026") ClickUp must filter DONE
+        # tasks against that month too — not the wall-clock month generate()
+        # started with.
+        session = _make_session()
+        user_id = uuid.uuid4()
+        client = _client(session, name="Acme Co", domain="acme.com", ga4_sheet_id="sheet-123")
+        settings_service.set_clickup_token(session, user_id, "pk_x")
+        task_done_in_june = [{
+            "name": "Ship redesign", "url": "https://app.clickup.com/t/1",
+            "status": {"status": "done", "type": "done"}, "date_done": "1781481600000",  # 2026-06-15
+            "assignees": [],
+        }]
+        with _patched_ga4_sheet(), patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.find_client_list",
+            return_value={"id": "list-1", "name": "acme"},
+        ), patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
+            return_value=task_done_in_june,
+        ):
+            result = report_service.generate(
+                session,
+                client_id=client.id,
+                block_keys=["ga4_summary", "work_completed"],
+                user_id=user_id,
+            )
+        self.assertEqual(result["period_label"], "Jun 2026")
+        by_key = {block["block_type_key"]: block for block in result["blocks"]}
+        self.assertEqual(by_key["work_completed"]["status"], "ok")
+        self.assertEqual(by_key["work_completed"]["data"]["count"], 1)
+
 
 class ServiceTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -677,29 +736,86 @@ class ServiceTests(unittest.TestCase):
 
 
 class ExportTests(unittest.TestCase):
-    def test_export_html_is_self_contained_and_includes_data_and_comment(self) -> None:
+    def _export(self):
+        import json as _json
+        import re as _re
+
         session = _make_session()
-        client = _client(session)
+        client = _client(session, name="Acme Co", domain="acme.com")
         report = report_service.save_report(
             session,
             client_id=client.id,
-            period_label="2026-06",
+            period_label="Jun 2026",
             blocks=[
-                {"block_type_key": "intro_header", "status": "ok", "data": {"headline": "Great month"}, "comment": "Client is happy"},
+                {"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""},
+                {"block_type_key": "search_industry", "status": "ok", "data": {}, "comment": "Watch the June core update."},
+                {"block_type_key": "ga4_summary", "status": "ok", "comment": "", "data": {
+                    "period": "Jun 2026", "previous_period": "May 2026", "yoy_period": "Jun 2025",
+                    "kpis": {
+                        "current": {"sessions": 1000, "organic_sessions": 500, "total_users": 800,
+                                    "new_users": 600, "returning_users": 200, "engaged_sessions": 900,
+                                    "engagement_rate": 90.0, "bounce_rate": 10.0,
+                                    "avg_session_duration_seconds": 120, "page_views": 3000,
+                                    "pages_per_session": 3.0, "key_events": 2000},
+                        "previous": {"sessions": 1200}, "yoy": {"sessions": 500},
+                    },
+                    "channels": [{"channel": "Organic Search", "sessions": 500, "engaged_sessions": 450, "users": 400}],
+                    "daily": [{"date": "20260601", "sessions": 33, "engaged_sessions": 30, "users": 28}],
+                    "top_events": [{"event_name": "page_view", "count": 3000, "users": 800}],
+                }},
+                {"block_type_key": "work_completed", "status": "unavailable", "data": None,
+                 "comment": "", "unavailable_reason": "No ClickUp API key connected."},
             ],
             generated_by=uuid.uuid4(),
         )
         report_row, blocks = report_service.get_report(session, report.id)
-        html_doc = report_export.build_report_html(
+        doc = report_export.build_report_html(
             report_row, blocks, client_name="Acme Co", client_domain="acme.com"
         )
-        self.assertIn("<!doctype html>", html_doc)
-        self.assertIn("Great month", html_doc)
-        self.assertIn("Client is happy", html_doc)
-        self.assertIn("Acme Co", html_doc)
-        # self-contained: no external resource references
-        self.assertNotIn("http://", html_doc)
-        self.assertNotIn("https://", html_doc)
+        data_match = _re.search(r"window\.DATA=(\{.*?\});</script>", doc, _re.DOTALL)
+        raw = data_match.group(1).replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+        return doc, _json.loads(raw)
+
+    def test_export_is_full_styled_html_document(self) -> None:
+        doc, _ = self._export()
+        self.assertTrue(doc.startswith("<!doctype html>"))
+        self.assertNotIn("{{", doc)  # all markup tokens filled
+        self.assertNotIn("__DATA_JSON__", doc)  # placeholder replaced
+        self.assertIn("RANKBERRY · <b>Acme Co</b> SEO Report", doc)
+        self.assertIn("June 2026", doc)
+        # script tags balanced — the injected DATA can't break out of <script>
+        self.assertEqual(doc.count("<script>"), doc.count("</script>"))
+
+    def test_export_is_self_contained(self) -> None:
+        doc, _ = self._export()
+        # no external resource loading (CSS/JS/fonts/images are all inline)
+        self.assertNotIn("<script src=", doc)
+        self.assertNotIn("<link ", doc)
+        self.assertNotIn("cdn", doc.lower())
+
+    def test_export_data_maps_stored_blocks(self) -> None:
+        _, data = self._export()
+        cur = data["meta"]["cur"]
+        self.assertEqual(data["meta"]["client"], "Acme Co")
+        self.assertEqual(data["meta"]["periodLong"], "June 2026")
+        self.assertEqual(data["ga4"][cur]["sessions"], 1000)
+        self.assertEqual(data["ga4"][cur]["organic"], 500)
+
+    def test_export_report_chrome_marks_selection_and_availability(self) -> None:
+        _, data = self._export()
+        blocks = data["report"]["blocks"]
+        self.assertTrue(blocks["b5"]["selected"])
+        self.assertEqual(blocks["b5"]["status"], "ok")
+        self.assertEqual(blocks["b12"]["status"], "unavailable")
+        self.assertIn("ClickUp", blocks["b12"]["reason"])
+        # unselected blocks (e.g. Ahrefs b3) are absent from chrome -> hidden
+        self.assertNotIn("b3", blocks)
+
+    def test_export_injects_comment_into_block_with_notes_box(self) -> None:
+        _, data = self._export()
+        # search_industry -> b2 has a specialist-notes box
+        self.assertIn("b2", data["report"]["comments"])
+        self.assertIn("Watch the June core update.", data["report"]["comments"]["b2"])
 
 
 class SecretsCryptoTests(unittest.TestCase):
@@ -796,6 +912,51 @@ class ClickUpClientMatchTests(unittest.TestCase):
             self.assertIsNone(find_client_list("tok", name="Unrelated", domain="nowhere.io"))
 
 
+class ClickUpIterAllListsTests(unittest.TestCase):
+    """_iter_all_lists must also surface lists shared with the token via the
+    "Shared with me" hierarchy, which lives outside the team's own space tree."""
+
+    def _fake_get(self, token, path, params=None):
+        responses = {
+            "team": {"teams": [{"id": "T1"}]},
+            "team/T1/space": {"spaces": [{"id": "S1"}]},
+            "space/S1/folder": {"folders": [
+                {"name": "Clients", "lists": [{"id": "1", "name": "Owned List"}]},
+            ]},
+            "space/S1/list": {"lists": [{"id": "2", "name": "Folderless List"}]},
+            "team/T1/shared": {"shared": {
+                "folders": [{"name": "Oleksiy", "lists": [{"id": "3", "name": "onebyone (30)"}]}],
+                "lists": [{"id": "4", "name": "Shared Folderless"},
+                          {"id": "1", "name": "Owned List"}],  # duplicate id -> suppressed
+            }},
+        }
+        return responses[path]
+
+    def test_yields_owned_and_shared_lists_deduped(self) -> None:
+        with patch(
+            "backend.app.report_builder.data_sources.clickup_client._get",
+            side_effect=self._fake_get,
+        ):
+            found = list(clickup_client_module._iter_all_lists("tok"))
+        by_id = {item["id"]: item for item in found}
+        self.assertEqual(sorted(by_id), ["1", "2", "3", "4"])  # no duplicate "1"
+        self.assertEqual(by_id["3"], {"id": "3", "name": "onebyone (30)", "folder": "Oleksiy"})
+        self.assertEqual(len(found), 4)
+
+    def test_shared_endpoint_failure_is_non_fatal(self) -> None:
+        def _get(token, path, params=None):
+            if path == "team/T1/shared":
+                raise ClickUpAccessError("shared not available")
+            return self._fake_get(token, path, params)
+
+        with patch(
+            "backend.app.report_builder.data_sources.clickup_client._get",
+            side_effect=_get,
+        ):
+            found = list(clickup_client_module._iter_all_lists("tok"))
+        self.assertEqual(sorted(i["id"] for i in found), ["1", "2"])
+
+
 def _clickup_tasks_fixture():
     return [
         {"name": "Publish blog post", "url": "https://app.clickup.com/t/1",
@@ -816,9 +977,9 @@ class ClickUpResolverTests(unittest.TestCase):
         self.user_id = uuid.uuid4()
         self.client = _client(self.session, name="Onebyone", domain="onebyone.ua")
 
-    def _context(self) -> ResolveContext:
+    def _context(self, period_label: str = "2025-06") -> ResolveContext:
         return ResolveContext(
-            client=self.client, period_label="", now=utcnow(),
+            client=self.client, period_label=period_label, now=utcnow(),
             session=self.session, user_id=self.user_id,
         )
 
@@ -834,9 +995,9 @@ class ClickUpResolverTests(unittest.TestCase):
         self.assertEqual(result.status, "unavailable")
         self.assertIn("No ClickUp list found", result.unavailable_reason)
 
-    def test_work_completed_and_planned_split_by_status_type(self) -> None:
+    def test_done_lists_period_completions_todo_lists_open_tasks(self) -> None:
         settings_service.set_clickup_token(self.session, self.user_id, "pk_x")
-        context = self._context()
+        context = self._context(period_label="2025-06")
         with patch(
             "backend.app.report_builder.data_sources.clickup.clickup_client.find_client_list",
             return_value={"id": "list-1", "name": "onebyone (30)"},
@@ -847,17 +1008,55 @@ class ClickUpResolverTests(unittest.TestCase):
             completed = clickup.resolve(get_block("work_completed"), context)
             planned = clickup.resolve(get_block("planned_works"), context)
 
+        # DONE: only the "Done"-status task in June 2025 — "complete" (closed/
+        # archived) doesn't count, even though it was also closed that month.
         self.assertEqual(completed.status, "ok")
-        self.assertEqual(completed.data["count"], 2)
-        self.assertEqual({t["name"] for t in completed.data["tasks"]}, {"Publish blog post", "Fix meta tags"})
+        self.assertEqual(completed.data["count"], 1)
+        self.assertEqual({t["name"] for t in completed.data["tasks"]}, {"Publish blog post"})
         self.assertEqual(completed.data["tasks"][0]["date_done"], "2025-06-15")
 
+        # TODO: only the "Todo"-status task — "doing" (in progress) doesn't count.
         self.assertEqual(planned.status, "ok")
-        self.assertEqual(planned.data["count"], 2)
-        self.assertEqual({t["name"] for t in planned.data["tasks"]}, {"Build backlinks", "Keyword research"})
+        self.assertEqual(planned.data["count"], 1)
+        self.assertEqual({t["name"] for t in planned.data["tasks"]}, {"Build backlinks"})
 
         # both blocks share a single tasks fetch via the context cache
         mocked_fetch.assert_called_once()
+
+    def test_done_excludes_tasks_completed_outside_the_period(self) -> None:
+        settings_service.set_clickup_token(self.session, self.user_id, "pk_x")
+        # Reporting July 2025: the June completions must NOT be re-listed, and a
+        # done task with no completion date is not counted for the period.
+        context = self._context(period_label="2025-07")
+        with patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.find_client_list",
+            return_value={"id": "list-1", "name": "onebyone (30)"},
+        ), patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
+            return_value=_clickup_tasks_fixture(),
+        ):
+            completed = clickup.resolve(get_block("work_completed"), context)
+            planned = clickup.resolve(get_block("planned_works"), context)
+
+        self.assertEqual(completed.status, "ok")
+        self.assertEqual(completed.data["count"], 0)
+        # TODO is period-independent: the same "Todo"-status task remains the plan.
+        self.assertEqual(planned.data["count"], 1)
+
+    def test_done_parses_named_month_period_labels(self) -> None:
+        # Real saved reports use author-chosen labels like "Jun 2026" (matched
+        # verbatim against a GA4/GSC sheet's "Period" column), not "YYYY-MM".
+        settings_service.set_clickup_token(self.session, self.user_id, "pk_x")
+        context = self._context(period_label="Jun 2025")
+        with patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.find_client_list",
+            return_value={"id": "list-1", "name": "onebyone (30)"},
+        ), patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
+            return_value=_clickup_tasks_fixture(),
+        ):
+            completed = clickup.resolve(get_block("work_completed"), context)
+        self.assertEqual(completed.data["count"], 1)
 
     def test_api_error_becomes_unavailable(self) -> None:
         settings_service.set_clickup_token(self.session, self.user_id, "pk_x")
@@ -868,6 +1067,677 @@ class ClickUpResolverTests(unittest.TestCase):
             result = clickup.resolve(get_block("work_completed"), self._context())
         self.assertEqual(result.status, "unavailable")
         self.assertIn("401", result.unavailable_reason)
+
+
+class PeriodWindowTests(unittest.TestCase):
+    def test_default_selection_is_latest_single_month(self) -> None:
+        windows = periods.resolve_windows(["Jun 2026", "May 2026", "Jun 2025"], None)
+        self.assertEqual(windows.current.labels, ["Jun 2026"])
+        self.assertEqual(windows.current.display, "Jun 2026")
+        self.assertEqual(windows.previous.labels, ["May 2026"])
+        self.assertEqual(windows.yoy.labels, ["Jun 2025"])
+
+    def test_range_selection_builds_current_previous_yoy(self) -> None:
+        selection = PeriodSelection(start=date(2026, 5, 1), end=date(2026, 6, 1))
+        windows = periods.resolve_windows(
+            ["Jun 2026", "May 2026", "Apr 2026", "Jun 2025", "May 2025"], selection
+        )
+        self.assertEqual(windows.current.labels, ["May 2026", "Jun 2026"])
+        self.assertEqual(windows.current.display, "May 2026 – Jun 2026")
+        # previous = the equally long span immediately before (Mar+Apr); only Apr present
+        self.assertEqual(windows.previous.labels, ["Apr 2026"])
+        self.assertEqual(windows.previous.display, "Mar 2026 – Apr 2026")
+        self.assertEqual(windows.yoy.labels, ["May 2025", "Jun 2025"])
+
+    def test_yearly_selection_display_is_the_year(self) -> None:
+        selection = periods.parse_selection("2026-01-01", "2026-12-31", "yearly")
+        self.assertIsNotNone(selection)
+        self.assertEqual(periods.selection_display(selection), "2026")
+
+    def test_parse_selection_requires_both_bounds(self) -> None:
+        self.assertIsNone(periods.parse_selection("2026-01-01", None))
+        self.assertIsNone(periods.parse_selection(None, None))
+
+    def test_window_latest_picks_most_recent_label(self) -> None:
+        selection = PeriodSelection(start=date(2026, 1, 1), end=date(2026, 6, 1))
+        windows = periods.resolve_windows(["Jan 2026", "Mar 2026", "Jun 2026"], selection)
+        self.assertEqual(windows.current.latest, "Jun 2026")
+
+
+class GA4RangeAggregationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session = _make_session()
+        self.client = _client(self.session, name="Acme Co", ga4_sheet_id="sheet-123")
+
+    def _context(self, selection) -> ResolveContext:
+        return ResolveContext(
+            client=self.client,
+            period_label="",
+            now=utcnow(),
+            session=self.session,
+            period_selection=selection,
+        )
+
+    def test_summary_sums_kpis_across_the_range(self) -> None:
+        selection = PeriodSelection(start=date(2026, 5, 1), end=date(2026, 6, 1))
+        with _patched_ga4_sheet():
+            result = ga4.resolve(get_block("ga4_summary"), self._context(selection))
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.data["period"], "May 2026 – Jun 2026")
+        # May + Jun 2026 sessions summed
+        self.assertEqual(result.data["kpis"]["current"]["sessions"], 1030014 + 1337409)
+        # yoy window is May+Jun 2025; only Jun 2025 present in the fixture
+        self.assertEqual(result.data["kpis"]["yoy"]["sessions"], 518345)
+        # channels aggregated across both months: Direct = 162884 (Jun) + 150000 (May)
+        by_channel = {c["channel"]: c["sessions"] for c in result.data["channels"]}
+        self.assertEqual(by_channel["Direct"], 162884 + 150000)
+        self.assertEqual(result.data["channels"][0]["channel"], "Direct")  # sorted desc
+
+
+class SelectionsServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session = _make_session()
+        self.user_id = uuid.uuid4()
+        self.client_id = uuid.uuid4()
+
+    def test_defaults_when_nothing_saved(self) -> None:
+        selection = selections_service.get_selection(self.session, self.user_id, self.client_id)
+        self.assertEqual(selection["block_keys"], [])
+        self.assertEqual(selection["report_type"], "monthly")
+
+    def test_save_and_restore_roundtrip(self) -> None:
+        selections_service.save_selection(
+            self.session,
+            self.user_id,
+            self.client_id,
+            block_keys=["ga4_summary", "gsc_summary"],
+            report_type="yearly",
+            date_from="2026-01-01",
+            date_to="2026-12-31",
+        )
+        selection = selections_service.get_selection(self.session, self.user_id, self.client_id)
+        self.assertEqual(selection["block_keys"], ["ga4_summary", "gsc_summary"])
+        self.assertEqual(selection["report_type"], "yearly")
+        self.assertEqual(selection["date_from"], "2026-01-01")
+
+    def test_save_updates_existing_row(self) -> None:
+        selections_service.save_selection(
+            self.session, self.user_id, self.client_id, block_keys=["ga4_summary"]
+        )
+        selections_service.save_selection(
+            self.session, self.user_id, self.client_id, block_keys=["gsc_summary"]
+        )
+        selection = selections_service.get_selection(self.session, self.user_id, self.client_id)
+        self.assertEqual(selection["block_keys"], ["gsc_summary"])
+
+    def test_selection_is_scoped_per_user_and_client(self) -> None:
+        other_client = uuid.uuid4()
+        selections_service.save_selection(
+            self.session, self.user_id, self.client_id, block_keys=["ga4_summary"]
+        )
+        other = selections_service.get_selection(self.session, self.user_id, other_client)
+        self.assertEqual(other["block_keys"], [])
+
+    def test_period_and_comparisons_roundtrip(self) -> None:
+        selections_service.save_selection(
+            self.session,
+            self.user_id,
+            self.client_id,
+            block_keys=["ga4_summary"],
+            period_preset="last_3_months",
+            comparisons=["yoy", "mom"],
+        )
+        selection = selections_service.get_selection(self.session, self.user_id, self.client_id)
+        self.assertEqual(selection["period_preset"], "last_3_months")
+        self.assertEqual(selection["comparisons"], ["yoy", "mom"])
+
+    def test_legacy_stored_preset_restores_as_period_and_comparisons(self) -> None:
+        # a selection saved before the period/comparison split
+        selections_service.save_selection(
+            self.session,
+            self.user_id,
+            self.client_id,
+            block_keys=["ga4_summary"],
+            comparison="last_month_vs_year",
+        )
+        selection = selections_service.get_selection(self.session, self.user_id, self.client_id)
+        self.assertEqual(selection["period_preset"], "last_month")
+        self.assertEqual(selection["comparisons"], ["yoy"])
+
+    def test_advanced_timeframe_stores_no_period_preset(self) -> None:
+        selections_service.save_selection(
+            self.session,
+            self.user_id,
+            self.client_id,
+            block_keys=["ga4_summary"],
+            report_type="yearly",
+            date_from="2026-01-01",
+            date_to="2026-12-31",
+        )
+        selection = selections_service.get_selection(self.session, self.user_id, self.client_id)
+        self.assertIsNone(selection["period_preset"])
+        self.assertEqual(selection["comparisons"], [])
+
+
+class ClickUpRangeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session = _make_session()
+        self.user_id = uuid.uuid4()
+        self.client = _client(self.session, name="Onebyone", domain="onebyone.ua")
+        settings_service.set_clickup_token(self.session, self.user_id, "pk_x")
+
+    def _context(self, selection) -> ResolveContext:
+        return ResolveContext(
+            client=self.client,
+            period_label="",
+            now=utcnow(),
+            session=self.session,
+            user_id=self.user_id,
+            period_selection=selection,
+        )
+
+    def _resolve_completed(self, selection):
+        with patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.find_client_list",
+            return_value={"id": "list-1", "name": "onebyone (30)"},
+        ), patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
+            return_value=_clickup_tasks_fixture(),
+        ):
+            return clickup.resolve(get_block("work_completed"), self._context(selection))
+
+    def test_done_task_counts_when_range_includes_completion_month(self) -> None:
+        # fixture's DONE task completed 2025-06-15
+        selection = PeriodSelection(start=date(2025, 5, 1), end=date(2025, 7, 1))
+        result = self._resolve_completed(selection)
+        self.assertEqual(result.data["count"], 1)
+
+    def test_done_task_excluded_when_range_misses_completion_month(self) -> None:
+        selection = PeriodSelection(start=date(2025, 8, 1), end=date(2025, 9, 1))
+        result = self._resolve_completed(selection)
+        self.assertEqual(result.data["count"], 0)
+
+
+class ComparisonPresetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # 15 Jul 2026 -> last completed month is Jun 2026.
+        self.now = datetime(2026, 7, 15, tzinfo=timezone.utc)
+
+    def test_last_month_vs_prev_is_single_month_mom(self) -> None:
+        selection, mode = periods.parse_comparison("last_month_vs_prev", self.now)
+        self.assertEqual(selection.start, date(2026, 6, 1))
+        self.assertEqual(selection.end, date(2026, 6, 1))
+        self.assertEqual(mode, "mom")
+
+    def test_last_month_vs_year_is_single_month_yoy(self) -> None:
+        selection, mode = periods.parse_comparison("last_month_vs_year", self.now)
+        self.assertEqual(selection.start, date(2026, 6, 1))
+        self.assertEqual(selection.end, date(2026, 6, 1))
+        self.assertEqual(mode, "yoy")
+
+    def test_last_3_months_vs_year_spans_three_months_yoy(self) -> None:
+        selection, mode = periods.parse_comparison("last_3_months_vs_year", self.now)
+        self.assertEqual(selection.start, date(2026, 4, 1))
+        self.assertEqual(selection.end, date(2026, 6, 1))
+        self.assertEqual(mode, "yoy")
+        self.assertEqual(periods.selection_display(selection), "Apr 2026 – Jun 2026")
+
+    def test_unknown_preset_returns_none(self) -> None:
+        self.assertIsNone(periods.parse_comparison("nope", self.now))
+        self.assertIsNone(periods.parse_comparison(None, self.now))
+
+    def test_preset_crosses_year_boundary(self) -> None:
+        selection, _ = periods.parse_comparison("last_3_months_vs_year", datetime(2026, 1, 10, tzinfo=timezone.utc))
+        # last completed month is Dec 2025; three-month window is Oct–Dec 2025
+        self.assertEqual(selection.start, date(2025, 10, 1))
+        self.assertEqual(selection.end, date(2025, 12, 1))
+
+
+class PeriodPresetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # 15 Jul 2026 -> last completed month is Jun 2026.
+        self.now = datetime(2026, 7, 15, tzinfo=timezone.utc)
+
+    def test_last_month_is_the_last_completed_month(self) -> None:
+        selection = periods.parse_period_preset("last_month", self.now)
+        self.assertEqual(selection.start, date(2026, 6, 1))
+        self.assertEqual(selection.end, date(2026, 6, 1))
+
+    def test_last_3_months_spans_three_whole_months(self) -> None:
+        selection = periods.parse_period_preset("last_3_months", self.now)
+        self.assertEqual(selection.start, date(2026, 4, 1))
+        self.assertEqual(selection.end, date(2026, 6, 1))
+        self.assertEqual(periods.selection_display(selection), "Apr 2026 – Jun 2026")
+
+    def test_unknown_period_preset_returns_none(self) -> None:
+        self.assertIsNone(periods.parse_period_preset("last_decade", self.now))
+        self.assertIsNone(periods.parse_period_preset(None, self.now))
+
+    def test_normalize_comparisons_keeps_order_and_drops_noise(self) -> None:
+        self.assertEqual(periods.normalize_comparisons(["yoy", "mom", "yoy"]), ["yoy", "mom"])
+        self.assertEqual(periods.normalize_comparisons(["MoM"]), ["mom"])
+        self.assertEqual(periods.normalize_comparisons(["nope"]), ["mom"])
+        self.assertEqual(periods.normalize_comparisons([]), ["mom"])
+
+    def test_legacy_preset_maps_onto_period_and_comparisons(self) -> None:
+        self.assertEqual(periods.legacy_comparison_preset("last_month_vs_year"), ("last_month", ["yoy"]))
+        self.assertEqual(
+            periods.legacy_comparison_preset("last_3_months_vs_year"), ("last_3_months", ["yoy"])
+        )
+        self.assertIsNone(periods.legacy_comparison_preset("nope"))
+
+
+class GenerateComparisonTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session = _make_session()
+
+    def test_generate_sets_default_comparison_from_legacy_preset(self) -> None:
+        client = _client(self.session)
+        result = report_service.generate(
+            self.session,
+            client_id=client.id,
+            block_keys=["intro_header"],
+            comparison="last_3_months_vs_year",
+        )
+        self.assertEqual(result["default_comparison"], "yoy")
+
+    def test_generate_keeps_every_chosen_comparison_in_order(self) -> None:
+        client = _client(self.session)
+        result = report_service.generate(
+            self.session,
+            client_id=client.id,
+            block_keys=["intro_header"],
+            period_preset="last_3_months",
+            comparisons=["yoy", "mom"],
+        )
+        # first chosen comparison is the one the report opens on
+        self.assertEqual(result["default_comparison"], "yoy,mom")
+
+    def test_generate_drops_unknown_comparisons(self) -> None:
+        client = _client(self.session)
+        result = report_service.generate(
+            self.session,
+            client_id=client.id,
+            block_keys=["intro_header"],
+            period_preset="last_month",
+            comparisons=["nonsense", "yoy", "yoy"],
+        )
+        self.assertEqual(result["default_comparison"], "yoy")
+
+    def test_generate_offers_both_comparisons_without_a_preset(self) -> None:
+        client = _client(self.session)
+        result = report_service.generate(
+            self.session,
+            client_id=client.id,
+            block_keys=["intro_header"],
+        )
+        self.assertEqual(result["default_comparison"], "mom,yoy")
+
+    def test_save_persists_default_comparison(self) -> None:
+        client = _client(self.session)
+        report = report_service.save_report(
+            self.session,
+            client_id=client.id,
+            period_label="Jun 2026",
+            blocks=[{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""}],
+            generated_by=uuid.uuid4(),
+            default_comparison="yoy",
+        )
+        summary = report_service.serialize_report_summary(report)
+        self.assertEqual(summary["default_comparison"], "yoy")
+
+
+class PlannedWorkManualTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session = _make_session()
+
+    def test_manual_planned_work_skips_clickup_and_stores_text(self) -> None:
+        client = _client(self.session)
+        result = report_service.generate(
+            self.session,
+            client_id=client.id,
+            block_keys=["planned_works"],
+            user_id=uuid.uuid4(),  # no ClickUp token — manual must not need one
+            planned_work_mode="manual",
+            planned_work_text="Ship the new landing pages and refresh meta titles.",
+        )
+        block = {b["block_type_key"]: b for b in result["blocks"]}["planned_works"]
+        self.assertEqual(block["status"], "ok")
+        self.assertEqual(block["data"]["mode"], "manual")
+        self.assertIn("landing pages", block["data"]["text"])
+
+
+class TaskTableExportTests(unittest.TestCase):
+    def test_task_rows_lead_with_description_and_drop_category(self) -> None:
+        import json as _json
+        import re as _re
+
+        session = _make_session()
+        client = _client(session, name="Acme Co", domain="acme.com")
+        report = report_service.save_report(
+            session,
+            client_id=client.id,
+            period_label="Jun 2026",
+            blocks=[
+                {"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""},
+                {"block_type_key": "work_completed", "status": "ok", "comment": "", "data": {
+                    "list_name": "acme", "count": 2, "tasks": [
+                        {"name": "Publish blog post", "description": "Wrote and published the spring guide.",
+                         "url": "https://app.clickup.com/t/abc"},
+                        {"name": "Fix meta tags", "description": "", "url": "https://app.clickup.com/t/def"},
+                    ]},
+                },
+            ],
+            generated_by=uuid.uuid4(),
+        )
+        report_row, blocks = report_service.get_report(session, report.id)
+        doc = report_export.build_report_html(report_row, blocks, client_name="Acme Co", client_domain="acme.com")
+        raw = _re.search(r"window\.DATA=(\{.*?\});</script>", doc, _re.DOTALL).group(1)
+        raw = raw.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+        data = _json.loads(raw)
+        rows = data["workDone"]
+        # [summary, task, id]: summary is the description, or the title when empty
+        self.assertEqual(rows[0], ["Wrote and published the spring guide.", "Publish blog post", "abc"])
+        self.assertEqual(rows[1], ["Fix meta tags", "Fix meta tags", "def"])
+
+    def test_manual_planned_work_exports_as_text(self) -> None:
+        import json as _json
+        import re as _re
+
+        session = _make_session()
+        client = _client(session, name="Acme Co", domain="acme.com")
+        report = report_service.save_report(
+            session,
+            client_id=client.id,
+            period_label="Jun 2026",
+            blocks=[
+                {"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""},
+                {"block_type_key": "planned_works", "status": "ok", "comment": "", "data": {
+                    "mode": "manual", "text": "Launch the summer campaign.", "tasks": []}},
+            ],
+            generated_by=uuid.uuid4(),
+        )
+        report_row, blocks = report_service.get_report(session, report.id)
+        doc = report_export.build_report_html(report_row, blocks, client_name="Acme Co", client_domain="acme.com")
+        raw = _re.search(r"window\.DATA=(\{.*?\});</script>", doc, _re.DOTALL).group(1)
+        raw = raw.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+        data = _json.loads(raw)
+        self.assertIn("Launch the summer campaign.", data["workPlannedManual"])
+        self.assertEqual(data["workPlanned"], [])
+
+
+class CleanExportTests(unittest.TestCase):
+    def _doc(self):
+        session = _make_session()
+        client = _client(session, name="Acme Co", domain="acme.com")
+        report = report_service.save_report(
+            session,
+            client_id=client.id,
+            period_label="Jun 2026",
+            blocks=[
+                {"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""},
+                {"block_type_key": "search_industry", "status": "ok", "data": {}, "comment": "Watch the core update."},
+                {"block_type_key": "ga4_summary", "status": "ok", "comment": "", "data": {
+                    "period": "Jun 2026", "previous_period": "May 2026", "yoy_period": "Jun 2025",
+                    "kpis": {"current": {"sessions": 1000}, "previous": {"sessions": 900}, "yoy": {"sessions": 500}},
+                }},
+            ],
+            generated_by=uuid.uuid4(),
+            default_comparison="yoy",
+        )
+        report_row, blocks = report_service.get_report(session, report.id)
+        return report_export.build_report_html(report_row, blocks, client_name="Acme Co", client_domain="acme.com")
+
+    def test_no_save_or_print_controls(self) -> None:
+        doc = self._doc()
+        self.assertNotIn("Save report", doc)
+        self.assertNotIn("window.print()", doc)
+        self.assertNotIn("Print / PDF", doc)
+
+    def test_comment_label_replaces_specialist_notes(self) -> None:
+        doc = self._doc()
+        self.assertNotIn("Specialist", doc)
+        self.assertNotIn("✎ Notes", doc)
+        self.assertIn(">Comment<", doc)  # card-comment label
+
+    def test_default_comparison_carried_into_meta(self) -> None:
+        import json as _json
+        import re as _re
+
+        doc = self._doc()
+        raw = _re.search(r"window\.DATA=(\{.*?\});</script>", doc, _re.DOTALL).group(1)
+        raw = raw.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+        data = _json.loads(raw)
+        self.assertEqual(data["meta"]["defaultMode"], "yoy")
+
+
+class ComparisonToggleExportTests(unittest.TestCase):
+    """The report offers one toggle per comparison the specialist chose."""
+
+    def _data(self, default_comparison: str, *, yoy: bool = True):
+        import json as _json
+        import re as _re
+
+        session = _make_session()
+        client = _client(session, name="Acme Co", domain="acme.com")
+        ga4 = {
+            "period": "Jun 2026", "previous_period": "May 2026",
+            "kpis": {"current": {"sessions": 1000}, "previous": {"sessions": 900}},
+        }
+        if yoy:
+            ga4["yoy_period"] = "Jun 2025"
+            ga4["kpis"]["yoy"] = {"sessions": 500}
+        report = report_service.save_report(
+            session,
+            client_id=client.id,
+            period_label="Jun 2026",
+            blocks=[{"block_type_key": "ga4_summary", "status": "ok", "comment": "", "data": ga4}],
+            generated_by=uuid.uuid4(),
+            default_comparison=default_comparison,
+        )
+        report_row, blocks = report_service.get_report(session, report.id)
+        doc = report_export.build_report_html(
+            report_row, blocks, client_name="Acme Co", client_domain="acme.com"
+        )
+        raw = _re.search(r"window\.DATA=(\{.*?\});</script>", doc, _re.DOTALL).group(1)
+        raw = raw.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+        return doc, _json.loads(raw)
+
+    def test_both_chosen_comparisons_become_toggles(self) -> None:
+        _, data = self._data("mom,yoy")
+        modes = data["meta"]["modes"]
+        self.assertEqual([mode["id"] for mode in modes], ["mom", "yoy"])
+        self.assertEqual(modes[0]["label"], "Jun 2026 vs May 2026 · MoM")
+        self.assertEqual(modes[1]["label"], "Jun 2026 vs Jun 2025 · YoY")
+        self.assertEqual(data["meta"]["defaultMode"], "mom")
+
+    def test_chosen_order_decides_which_comparison_opens(self) -> None:
+        _, data = self._data("yoy,mom")
+        self.assertEqual([mode["id"] for mode in data["meta"]["modes"]], ["yoy", "mom"])
+        self.assertEqual(data["meta"]["defaultMode"], "yoy")
+
+    def test_single_chosen_comparison_is_the_only_toggle(self) -> None:
+        _, data = self._data("yoy")
+        self.assertEqual([mode["id"] for mode in data["meta"]["modes"]], ["yoy"])
+
+    def test_comparison_without_data_is_dropped(self) -> None:
+        # no yoy period in the sheet -> the yoy toggle would compare against nothing
+        _, data = self._data("mom,yoy", yoy=False)
+        self.assertEqual([mode["id"] for mode in data["meta"]["modes"]], ["mom"])
+
+    def test_multi_month_window_compares_against_the_previous_period(self) -> None:
+        labels = report_export._mode_label("Apr 2026 – Jun 2026", "Jan 2026 – Mar 2026", "mom")
+        self.assertEqual(labels, "Apr 2026 – Jun 2026 vs Jan 2026 – Mar 2026 · Prev. period")
+        self.assertTrue(report_export._mode_label("2026", "2025", "yoy").endswith("· YoY"))
+
+    def test_report_header_carries_the_period(self) -> None:
+        doc, _ = self._data("mom")
+        # the pinned top bar names the client and the period it covers
+        self.assertIn('<span class="cb-period">June 2026</span>', doc)
+        self.assertIn("position:sticky", doc)
+
+
+class CommentLinkTests(unittest.TestCase):
+    """URLs a specialist types into a comment must be live links in the report."""
+
+    def test_plain_url_becomes_an_anchor(self) -> None:
+        out = report_export._comment_html("See https://example.com/report?a=1&b=2 for details.")
+        self.assertIn('href="https://example.com/report?a=1&amp;b=2"', out)
+        self.assertIn('target="_blank"', out)
+        self.assertIn('rel="noopener noreferrer"', out)
+
+    def test_bare_www_link_gets_a_scheme(self) -> None:
+        self.assertIn('href="https://www.example.com"', report_export._comment_html("www.example.com"))
+
+    def test_trailing_sentence_punctuation_stays_outside_the_link(self) -> None:
+        out = report_export._comment_html("Ranking page: https://example.com/page.")
+        self.assertIn('>https://example.com/page</a>.', out)
+
+    def test_bracket_inside_the_url_is_kept(self) -> None:
+        out = report_export._comment_html("https://en.wikipedia.org/wiki/SEO_(marketing)")
+        self.assertIn(">https://en.wikipedia.org/wiki/SEO_(marketing)</a>", out)
+
+    def test_surrounding_text_is_still_escaped(self) -> None:
+        out = report_export._comment_html("<b>bold</b> https://example.com\nnext line")
+        self.assertIn("&lt;b&gt;bold&lt;/b&gt;", out)
+        self.assertIn("<br>", out)
+        self.assertEqual(out.count("<a "), 1)
+
+    def test_comment_links_survive_into_the_exported_report(self) -> None:
+        session = _make_session()
+        client = _client(session, name="Acme Co", domain="acme.com")
+        report = report_service.save_report(
+            session,
+            client_id=client.id,
+            period_label="Jun 2026",
+            blocks=[
+                {"block_type_key": "search_industry", "status": "ok", "data": {},
+                 "comment": "Details: https://example.com/audit"},
+            ],
+            generated_by=uuid.uuid4(),
+        )
+        report_row, blocks = report_service.get_report(session, report.id)
+        doc = report_export.build_report_html(
+            report_row, blocks, client_name="Acme Co", client_domain="acme.com"
+        )
+        self.assertIn("https://example.com/audit", doc)
+        self.assertIn("\\u003ca href=", doc)  # anchor, escaped for the <script> block
+
+
+class CustomizationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session = _make_session()
+
+    def _data_from_doc(self, doc):
+        import json as _json
+        import re as _re
+
+        raw = _re.search(r"window\.DATA=(\{.*?\});</script>", doc, _re.DOTALL).group(1)
+        raw = raw.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+        return _json.loads(raw)
+
+    def test_normalize_customization_fills_defaults(self) -> None:
+        norm = report_export._normalize_customization(None)
+        self.assertIsNone(norm["accent"])
+        self.assertEqual(norm["charts"], {})
+        self.assertEqual(norm["panels"], {})
+
+    def test_normalize_customization_rejects_bad_values(self) -> None:
+        norm = report_export._normalize_customization(
+            {"accent": "  ", "charts": {"ga4_mix": "bar"},
+             "panels": {"ga4_summary": {"scale": "huge", "headingWeight": "black"}}}
+        )
+        self.assertIsNone(norm["accent"])
+        self.assertEqual(norm["charts"], {"ga4_mix": "bar"})
+        # invalid per-panel values fall back to defaults, resolved for the template
+        panel = norm["panels"]["ga4_summary"]
+        self.assertEqual(panel["scale"], "normal")
+        self.assertEqual(panel["fontScale"], 1.0)
+        self.assertEqual(panel["headingWeight"], "700")
+
+    def test_normalize_panel_resolves_scale_and_weights(self) -> None:
+        norm = report_export._normalize_customization(
+            {"panels": {"ga4_summary": {"scale": "large", "headingWeight": "normal", "bodyWeight": "bold"}}}
+        )
+        panel = norm["panels"]["ga4_summary"]
+        self.assertEqual(panel["scale"], "large")
+        self.assertEqual(panel["fontScale"], 1.14)
+        self.assertEqual(panel["headingWeight"], "400")
+        self.assertEqual(panel["bodyWeight"], "700")
+
+    def test_preview_render_embeds_customization_and_editable(self) -> None:
+        client = _client(self.session, name="Acme Co", domain="acme.com")
+        doc = report_export.build_preview_html(
+            period_label="Jun 2026",
+            default_comparison="mom",
+            blocks=[{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""}],
+            client_name=client.name,
+            client_domain=client.domain,
+            customization={"accent": "#123456", "charts": {"ga4_mix": "bar"},
+                           "panels": {"ga4_summary": {"scale": "large"}}},
+            editable=True,
+        )
+        data = self._data_from_doc(doc)
+        self.assertTrue(data["editable"])
+        self.assertEqual(data["customization"]["accent"], "#123456")
+        self.assertEqual(data["customization"]["charts"]["ga4_mix"], "bar")
+        self.assertEqual(data["customization"]["panels"]["ga4_summary"]["scale"], "large")
+
+    def test_export_is_not_editable(self) -> None:
+        client = _client(self.session, name="Acme Co", domain="acme.com")
+        report = report_service.save_report(
+            self.session, client_id=client.id, period_label="Jun 2026",
+            blocks=[{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""}],
+            generated_by=uuid.uuid4(),
+        )
+        report_row, blocks = report_service.get_report(self.session, report.id)
+        doc = report_export.build_report_html(report_row, blocks, client_name="Acme Co", client_domain="acme.com")
+        self.assertFalse(self._data_from_doc(doc)["editable"])
+
+    def test_save_and_export_roundtrip_customization(self) -> None:
+        client = _client(self.session, name="Acme Co", domain="acme.com")
+        custom = {"accent": "#ABCDEF", "charts": {"gsc_branded": "bar"},
+                  "panels": {"ga4_summary": {"scale": "large"}}}
+        report = report_service.save_report(
+            self.session,
+            client_id=client.id,
+            period_label="Jun 2026",
+            blocks=[{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""}],
+            generated_by=uuid.uuid4(),
+            customization=custom,
+        )
+        # serialized summary exposes it for the frontend to restore
+        summary = report_service.serialize_report_summary(report)
+        self.assertEqual(summary["customization"]["accent"], "#ABCDEF")
+        # export reads report.customization when none is passed explicitly
+        report_row, blocks = report_service.get_report(self.session, report.id)
+        doc = report_export.build_report_html(report_row, blocks, client_name="Acme Co", client_domain="acme.com")
+        data = self._data_from_doc(doc)
+        self.assertEqual(data["customization"]["accent"], "#ABCDEF")
+        self.assertEqual(data["customization"]["panels"]["ga4_summary"]["scale"], "large")
+        self.assertEqual(data["customization"]["charts"]["gsc_branded"], "bar")
+
+    def test_update_changes_customization(self) -> None:
+        client = _client(self.session, name="Acme Co", domain="acme.com")
+        report = report_service.save_report(
+            self.session,
+            client_id=client.id,
+            period_label="Jun 2026",
+            blocks=[{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""}],
+            generated_by=uuid.uuid4(),
+            customization={"accent": "#111111"},
+        )
+        report_service.update_report(
+            self.session,
+            report_id=report.id,
+            period_label="Jun 2026",
+            blocks=[{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""}],
+            generated_by=uuid.uuid4(),
+            customization={"accent": "#222222"},
+        )
+        updated = self.session.get(report_service.Report, report.id)
+        summary = report_service.serialize_report_summary(updated)
+        self.assertEqual(summary["customization"]["accent"], "#222222")
 
 
 if __name__ == "__main__":

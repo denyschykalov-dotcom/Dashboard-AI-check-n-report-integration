@@ -53,7 +53,16 @@ def _name_matches(list_name: str, needles: list[str]) -> bool:
 
 def _iter_all_lists(token: str) -> typing.Iterator[dict]:
     """Yield every list the token can see: folder lists + folderless lists,
-    across all spaces of all workspaces. Each yielded dict has id/name."""
+    across all spaces of all workspaces, plus the "Shared with me" hierarchy.
+    Each yielded dict has id/name. Duplicate list ids are suppressed."""
+
+    seen: set[str] = set()
+
+    def emit(list_id: str, name: str, folder: typing.Optional[str]) -> typing.Iterator[dict]:
+        if list_id in seen:
+            return
+        seen.add(list_id)
+        yield {"id": list_id, "name": name, "folder": folder}
 
     teams = _get(token, "team").get("teams", [])
     for team in teams:
@@ -63,10 +72,23 @@ def _iter_all_lists(token: str) -> typing.Iterator[dict]:
             folders = _get(token, f"space/{space_id}/folder", {"archived": "false"}).get("folders", [])
             for folder in folders:
                 for lst in folder.get("lists", []):
-                    yield {"id": lst["id"], "name": lst["name"], "folder": folder.get("name")}
+                    yield from emit(lst["id"], lst["name"], folder.get("name"))
             folderless = _get(token, f"space/{space_id}/list", {"archived": "false"}).get("lists", [])
             for lst in folderless:
-                yield {"id": lst["id"], "name": lst["name"], "folder": None}
+                yield from emit(lst["id"], lst["name"], None)
+
+        # Lists shared directly with this user live outside the team's own
+        # space tree (ClickUp's "Shared with me"), so the traversal above never
+        # reaches them. Pull them from the shared-hierarchy endpoint.
+        try:
+            shared = _get(token, f"team/{team['id']}/shared").get("shared", {})
+        except ClickUpAccessError:
+            shared = {}
+        for folder in shared.get("folders", []):
+            for lst in folder.get("lists", []):
+                yield from emit(lst["id"], lst["name"], folder.get("name"))
+        for lst in shared.get("lists", []):
+            yield from emit(lst["id"], lst["name"], None)
 
 
 def find_client_list(token: str, *, name: str, domain: str) -> typing.Optional[dict]:

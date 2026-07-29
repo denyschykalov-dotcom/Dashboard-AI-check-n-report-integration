@@ -70,6 +70,34 @@ class ClientCreateRequest(BaseModel):
 class GenerateReportRequest(BaseModel):
     client_id: uuid.UUID
     block_keys: list[str] = Field(default_factory=list)
+    # The reporting period preset ("last_month" | "last_3_months"). When set it
+    # drives the reporting window and overrides report_type/date_from/date_to
+    # (the Advanced custom-range path).
+    period_preset: typing.Optional[str] = None
+    # The comparisons the report should offer ("mom" and/or "yoy"); each becomes a
+    # toggle in the exported report and the first is the one it opens on.
+    comparisons: list[str] = Field(default_factory=list)
+    # Legacy single-choice comparison preset ("last_month_vs_prev" |
+    # "last_month_vs_year" | "last_3_months_vs_year"), honoured when no
+    # period_preset is given.
+    comparison: typing.Optional[str] = None
+    # Optional reporting range. Omit for the default latest-month report.
+    report_type: str = "monthly"  # "monthly" | "yearly"
+    date_from: typing.Optional[str] = None  # YYYY-MM-DD or YYYY-MM
+    date_to: typing.Optional[str] = None
+    # Planned-work source: pull the ClickUp "Todo" tasks, or a manually typed plan.
+    planned_work_mode: str = "clickup"  # "clickup" | "manual"
+    planned_work_text: str = ""
+
+
+class SelectionSaveRequest(BaseModel):
+    block_keys: list[str] = Field(default_factory=list)
+    period_preset: typing.Optional[str] = None
+    comparisons: list[str] = Field(default_factory=list)
+    comparison: typing.Optional[str] = None  # legacy single-choice preset key
+    report_type: str = "monthly"
+    date_from: typing.Optional[str] = None
+    date_to: typing.Optional[str] = None
 
 
 class ReportBlockPayload(BaseModel):
@@ -83,11 +111,25 @@ class ReportBlockPayload(BaseModel):
 class ReportSaveRequest(BaseModel):
     client_id: uuid.UUID
     period_label: str = ""
+    default_comparison: str = "mom"  # "mom" | "yoy"
+    customization: typing.Optional[dict] = None
     blocks: list[ReportBlockPayload] = Field(default_factory=list)
 
 
 class ReportUpdateRequest(BaseModel):
     period_label: typing.Optional[str] = None
+    default_comparison: typing.Optional[str] = None
+    customization: typing.Optional[dict] = None
+    blocks: list[ReportBlockPayload] = Field(default_factory=list)
+
+
+class ReportPreviewRequest(BaseModel):
+    """Render a live report preview from unsaved blocks + customization."""
+
+    client_id: uuid.UUID
+    period_label: str = ""
+    default_comparison: str = "mom"
+    customization: typing.Optional[dict] = None
     blocks: list[ReportBlockPayload] = Field(default_factory=list)
 
 

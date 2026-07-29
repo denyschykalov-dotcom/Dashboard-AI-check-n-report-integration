@@ -48,3 +48,7 @@ class ResolveContext:
     # The user generating the report — used for per-user credentials (e.g. that
     # user's own ClickUp API token).
     user_id: typing.Optional[uuid.UUID] = None
+    # Optional explicit reporting range (custom timeframe / full-year report).
+    # None means the default "latest month present" behaviour. Typed loosely to
+    # avoid importing periods.py in resolvers that don't need it.
+    period_selection: typing.Any = None

@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: "0.0.0.0",
-    allowedHosts: ["meatal-lanora-thornily.ngrok-free.dev"],
+    allowedHosts: ["meatal-lanora-thornily.ngrok-free.dev", ".ngrok-free.app"],
     proxy: {
       "/api": {
         target: API_PROXY_TARGET,

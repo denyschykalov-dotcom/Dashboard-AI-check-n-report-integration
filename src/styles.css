@@ -1983,6 +1983,72 @@ th {
   margin: 4px 0 0;
 }
 
+.report-timeframe {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.report-timeframe-modes {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.report-timeframe-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.report-comparison-presets {
+  flex-direction: column;
+  gap: 10px;
+}
+
+.report-timeframe-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.report-timeframe-group + .report-timeframe-group {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.report-timeframe-group h4 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.report-planned-work {
+  margin-top: 16px;
+}
+
+.report-timeframe-range {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.report-timeframe-range .field-stack {
+  flex: 1 1 180px;
+}
+
+.report-timeframe-year {
+  max-width: 220px;
+}
+
 .report-preview-block {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -2024,6 +2090,119 @@ th {
   max-height: 260px;
 }
 
+/* The preview is the working surface for editing a report, so it takes most of
+   the viewport height; "Full screen" hands it the whole window. */
+.report-preview-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 20px;
+  min-height: 0;
+}
+
+.report-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.report-preview-toolbar .report-hint {
+  margin: 0;
+}
+
+.report-preview-frame {
+  width: 100%;
+  height: min(88vh, 1400px);
+  min-height: 640px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.report-preview-shell.expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  margin: 0;
+  padding: 10px 12px 12px;
+  background: var(--bg, #fff);
+}
+
+.report-preview-shell.expanded .report-preview-frame {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  border-radius: 8px;
+}
+
+.report-customization {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin: 12px 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.report-customization-group h4 {
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+
+.report-customization-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.report-customization-controls .field-stack {
+  flex: 1 1 180px;
+  min-width: 160px;
+}
+
+.report-accent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.report-accent-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.report-accent-swatch.on {
+  border-color: var(--ink, #1e1633);
+  box-shadow: 0 0 0 2px #fff inset;
+}
+
+.report-accent-picker {
+  width: 40px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: none;
+  cursor: pointer;
+}
+
+.report-section-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+}
+
+.report-notes-title {
+  margin: 8px 0 10px;
+}
+
 .report-saved-table {
   width: 100%;
   border-collapse: collapse;
@@ -2058,4 +2237,30 @@ th {
   margin-top: 12px;
   border-top: 1px solid var(--line);
   padding-top: 12px;
+}
+
+
+.info-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1px solid var(--accent-strong);
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 1;
+  cursor: help;
+  vertical-align: middle;
+  user-select: none;
+}
+
+.info-badge:hover,
+.info-badge:focus {
+  background: var(--accent-strong);
+  color: #fff;
+  outline: none;
 }

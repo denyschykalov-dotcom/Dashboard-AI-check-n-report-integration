@@ -171,12 +171,29 @@ def _load_top_movers(context: ResolveContext, dates: ReportDates) -> dict[str, o
     return result
 
 
+def _anchor_date(context: ResolveContext) -> date:
+    """The date Ahrefs snapshots are taken relative to.
+
+    Ahrefs metrics are point-in-time, so a range/full-year report anchors on the
+    last month of the selection (``resolve_report_dates`` reports the most recent
+    *complete* month before the date it's given, so we pass the first day of the
+    month after the range end). With no selection this is just today.
+    """
+    selection = context.period_selection
+    if selection is not None:
+        end = selection.end
+        year = end.year + (end.month // 12)
+        month = (end.month % 12) + 1
+        return date(year, month, 1)
+    return context.now.date()
+
+
 def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
     target = (context.client.domain or "").strip()
     if not target:
         return BlockResult.unavailable("No domain set for this client.")
 
-    dates = ahrefs_client.resolve_report_dates(context.now.date())
+    dates = ahrefs_client.resolve_report_dates(_anchor_date(context))
     try:
         if block.key == "ahrefs_domain_analysis":
             return BlockResult.ok(_load_domain_analysis(context, dates))
