@@ -12,4 +12,9 @@ google-auth>=2.0
 requests>=2.31
 
 # Report Builder: Claude-written block comments + report summary
-anthropic>=0.60
+# Floor raised deliberately: the report commentary uses structured outputs
+# (output_config.format), the server-side web_search tool, and server-side
+# refusal fallbacks. 0.60 predates those, and a `>=0.60` pin leaves an already
+# installed old SDK in place on redeploy — so the features fail at runtime
+# rather than at install. Verified against 0.120.2.
+anthropic>=0.120
