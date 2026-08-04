@@ -67,6 +67,7 @@ class Settings:
     google_sheets_credentials_file: typing.Optional[str]
     google_sheets_client_folder_id: typing.Optional[str]
     ahrefs_api_token: typing.Optional[str]
+    seranking_api_key: typing.Optional[str]
     report_builder_secret_key: typing.Optional[str]
     openai_api_key: typing.Optional[str]
     gemini_api_key: typing.Optional[str]
@@ -94,6 +95,8 @@ class Settings:
     final_sentiment_prompt_file: Path
     report_block_comment_prompt_file: Path
     report_summary_prompt_file: Path
+    report_translate_prompt_file: Path
+    report_search_industry_prompt_file: Path
 
 
 @lru_cache(maxsize=1)
@@ -134,6 +137,7 @@ def get_settings() -> Settings:
         google_sheets_client_folder_id=_read_env("GOOGLE_SHEETS_CLIENT_FOLDER_ID"),
         # Env var name preserves the existing project spelling ("ACHREVS_API").
         ahrefs_api_token=_read_env("AHREFS_API_TOKEN") or _read_env("ACHREVS_API"),
+        seranking_api_key=_read_env("SERANKING_API_KEY"),
         report_builder_secret_key=_read_env("REPORT_BUILDER_SECRET_KEY"),
         openai_api_key=_read_env("OPENAI_API_KEY"),
         gemini_api_key=_read_env("GEMINI_API_KEY"),
@@ -146,7 +150,7 @@ def get_settings() -> Settings:
             _read_env("ANTHROPIC_SUMMARY_MODEL", "claude-opus-5") or "claude-opus-5"
         ),
         report_summary_max_chars=max(
-            int(_read_env("REPORT_SUMMARY_MAX_CHARS", "1500") or "1500"), 200
+            int(_read_env("REPORT_SUMMARY_MAX_CHARS", "1800") or "1800"), 200
         ),
         openai_model=_read_env("OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
         gemini_model=_read_env(
@@ -184,4 +188,6 @@ def get_settings() -> Settings:
         final_sentiment_prompt_file=PROMPTS_ROOT / "final_sentiment.txt",
         report_block_comment_prompt_file=PROMPTS_ROOT / "report_block_comment.txt",
         report_summary_prompt_file=PROMPTS_ROOT / "report_summary.txt",
+        report_translate_prompt_file=PROMPTS_ROOT / "report_translate.txt",
+        report_search_industry_prompt_file=PROMPTS_ROOT / "report_search_industry.txt",
     )

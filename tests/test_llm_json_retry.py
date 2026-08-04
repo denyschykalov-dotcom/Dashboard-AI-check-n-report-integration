@@ -23,6 +23,7 @@ def build_settings() -> Settings:
         google_sheets_credentials_file=None,
         google_sheets_client_folder_id=None,
         ahrefs_api_token=None,
+        seranking_api_key=None,
         report_builder_secret_key=None,
         openai_api_key="test",
         gemini_api_key="test",
@@ -48,6 +49,8 @@ def build_settings() -> Settings:
         final_sentiment_prompt_file=Path("final-sentiment.txt"),
         report_block_comment_prompt_file=Path("report-block-comment.txt"),
         report_summary_prompt_file=Path("report-summary.txt"),
+        report_translate_prompt_file=Path("report-translate.txt"),
+        report_search_industry_prompt_file=Path("report-industry.txt"),
     )
 
 

@@ -11,6 +11,18 @@ export type BlockCatalogResponse = {
   blocks: ReportBlockType[];
 };
 
+/**
+ * The language a client's reports are delivered in. Reports are always built in
+ * English; anything else adds a Claude translation pass over the commentary and
+ * swaps the static labels for their cached translations.
+ */
+export type ReportLanguage = "en" | "uk";
+
+export const REPORT_LANGUAGES: { value: ReportLanguage; label: string }[] = [
+  { value: "en", label: "English" },
+  { value: "uk", label: "Ukrainian" },
+];
+
 export type Client = {
   id: string;
   name: string;
@@ -18,7 +30,21 @@ export type Client = {
   ga4_sheet_id: string | null;
   clickup_list_id: string | null;
   se_ranking_target: string | null;
+  /** AI-check project the AI-visibility blocks read from; null matches on name. */
+  ai_visibility_project: string | null;
+  report_language: ReportLanguage;
   created_at: string;
+};
+
+/** An AI-check project that has runs, offered when linking a client to one. */
+export type AiVisibilityProject = {
+  project: string;
+  runs: number;
+  last_run_at: string | null;
+};
+
+export type AiVisibilityProjectsResponse = {
+  projects: AiVisibilityProject[];
 };
 
 export type ClientListResponse = {
@@ -76,6 +102,8 @@ export type ReportDetail = ReportSummary & {
 export type AiCommentsResponse = {
   comments: Record<string, string>;
   model: string;
+  /** The language the comments came back in. */
+  language?: ReportLanguage;
 };
 
 /** Claude's executive summary, written from the submitted report. */
@@ -83,6 +111,7 @@ export type AiSummaryResponse = {
   summary: string;
   model: string;
   block_type_key: string;
+  language?: ReportLanguage;
 };
 
 export type ReportSettingsStatus = {

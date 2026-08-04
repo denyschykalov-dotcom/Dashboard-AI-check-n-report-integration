@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import and_, delete, func, select, update
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Load, Session, sessionmaker
 
 from backend.app.config import Settings
 from backend.app.domain import (
@@ -473,14 +473,42 @@ class RunService:
         selected_user_id: typing.Optional[uuid.UUID] = None,
         is_admin: bool = False,
     ) -> dict[str, object]:
+        # Only the columns the counters below actually touch. Left as full ORM
+        # rows this hauled RunResult.sentiment_analysis and Run.prompt — free
+        # text nobody reads here — across the wire for every run ever recorded,
+        # to produce a few KB of counts. Primary keys load regardless, so
+        # run.id stays available for the cost lookup.
         all_rows = list(
-            session.execute(select(RunResult, Run).join(Run, Run.id == RunResult.run_id)).all()
+            session.execute(
+                select(RunResult, Run)
+                .join(Run, Run.id == RunResult.run_id)
+                .options(
+                    Load(RunResult).load_only(
+                        RunResult.gpt_brand_mention,
+                        RunResult.gem_brand_mention,
+                        RunResult.grok_brand_mention,
+                        RunResult.gpt_domain_mention,
+                        RunResult.gem_domain_mention,
+                        RunResult.grok_domain_mention,
+                    ),
+                    Load(Run).load_only(
+                        Run.user_id,
+                        Run.project,
+                        Run.created_at,
+                        Run.total_cost_usd,
+                    ),
+                )
+            ).all()
         )
         selected_project = (project or "").strip() or None
         selected_user_id = selected_user_id if is_admin else None
         project_options = self._collect_project_options(session, user_id=None if is_admin else user_id)
         user_options = self._collect_user_options(session) if is_admin else []
-        run_costs = self._build_run_costs_map(session, run_ids=[run.id for _, run in all_rows])
+        # Read the stored per-run total rather than re-summing the raw outputs.
+        # The runs are already loaded above, so this costs no extra query at all —
+        # where the old path pulled every Output row (~5.8 KB each, carrying the
+        # full LLM responses) on every page view.
+        run_costs = {run.id: float(run.total_cost_usd or 0.0) for _, run in all_rows}
 
         scoped_global_rows = [
             (run_result, run)
@@ -783,12 +811,46 @@ class RunService:
             session.commit()
         logger.info("run_finalize_completed run_id=%s sentiment_inputs=%s", run.id, len(sentiment_inputs))
 
+    @staticmethod
+    def _recalculate_run_cost(session: Session, run_id: uuid.UUID) -> float:
+        """Sum this run's spend in the database and store it on the run row.
+
+        Aggregated in SQL over one run, so it reads the four cost columns and
+        never the TOASTed LLM-response text beside them. Called at every terminal
+        transition, which is the point the cost stops changing.
+        """
+        outputs_total = session.execute(
+            select(
+                func.coalesce(
+                    func.sum(
+                        func.coalesce(Output.openai_generation_cost_usd, 0.0)
+                        + func.coalesce(Output.gemini_generation_cost_usd, 0.0)
+                        + func.coalesce(Output.grok_generation_cost_usd, 0.0)
+                        + func.coalesce(Output.gemini_analysis_cost_usd, 0.0)
+                    ),
+                    0.0,
+                )
+            ).where(Output.run_id == run_id)
+        ).scalar_one()
+        results_total = session.execute(
+            select(
+                func.coalesce(
+                    func.sum(func.coalesce(RunResult.gemini_sentiment_cost_usd, 0.0)), 0.0
+                )
+            ).where(RunResult.run_id == run_id)
+        ).scalar_one()
+
+        total = round(float(outputs_total or 0.0) + float(results_total or 0.0), 8)
+        session.execute(update(Run).where(Run.id == run_id).values(total_cost_usd=total))
+        return total
+
     def _mark_run_completed(self, run_id: uuid.UUID) -> None:
         with self.session_factory() as session:
             run = session.execute(select(Run).where(Run.id == run_id)).scalar_one()
             run.status = "completed"
             run.finished_at = utcnow()
             run.error_messages = None
+            self._recalculate_run_cost(session, run_id)
             session.commit()
 
     def _mark_run_failed(self, run_id: uuid.UUID, error: Exception) -> None:
@@ -799,6 +861,7 @@ class RunService:
             run.status = "failed"
             run.finished_at = utcnow()
             run.error_messages = compact_error_message(error)
+            self._recalculate_run_cost(session, run_id)
             session.commit()
 
     def _mark_run_stopped(self, run_id: uuid.UUID) -> None:
@@ -810,6 +873,7 @@ class RunService:
             run.finished_at = utcnow()
             if not run.error_messages:
                 run.error_messages = "Stopped by user."
+            self._recalculate_run_cost(session, run_id)
             session.commit()
 
     def _serialize_history_row(
@@ -1166,33 +1230,6 @@ class RunService:
             }
             for month in month_sequence
         ]
-
-    def _build_run_costs_map(
-        self,
-        session: Session,
-        *,
-        run_ids: list[uuid.UUID],
-    ) -> dict[uuid.UUID, float]:
-        if not run_ids:
-            return {}
-
-        costs: dict[uuid.UUID, float] = defaultdict(float)
-
-        for output in session.execute(select(Output).where(Output.run_id.in_(run_ids))).scalars():
-            costs[output.run_id] += sum(
-                value or 0.0
-                for value in (
-                    output.openai_generation_cost_usd,
-                    output.gemini_generation_cost_usd,
-                    output.grok_generation_cost_usd,
-                    output.gemini_analysis_cost_usd,
-                )
-            )
-
-        for result in session.execute(select(RunResult).where(RunResult.run_id.in_(run_ids))).scalars():
-            costs[result.run_id] += result.gemini_sentiment_cost_usd or 0.0
-
-        return {run_id: round(total, 8) for run_id, total in costs.items()}
 
     def _format_username(self, username: typing.Optional[str], user_id: uuid.UUID) -> str:
         cleaned = (username or "").strip()

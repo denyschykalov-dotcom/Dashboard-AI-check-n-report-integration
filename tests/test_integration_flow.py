@@ -4,7 +4,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool, QueuePool
 
@@ -128,6 +128,7 @@ def build_settings(database_url: str) -> Settings:
         google_sheets_credentials_file=None,
         google_sheets_client_folder_id=None,
         ahrefs_api_token=None,
+        seranking_api_key=None,
         report_builder_secret_key=None,
         openai_api_key="test",
         gemini_api_key="test",
@@ -153,6 +154,8 @@ def build_settings(database_url: str) -> Settings:
         final_sentiment_prompt_file=Path("final-sentiment.txt"),
         report_block_comment_prompt_file=Path("report-block-comment.txt"),
         report_summary_prompt_file=Path("report-summary.txt"),
+        report_translate_prompt_file=Path("report-translate.txt"),
+        report_search_industry_prompt_file=Path("report-industry.txt"),
     )
 
 
@@ -656,6 +659,14 @@ class IntegrationFlowTests(unittest.TestCase):
             )
             session.commit()
 
+        # Spend is stored on the run, written when a run reaches a terminal state.
+        # These fixtures insert outputs directly, so settle the totals the same way
+        # the worker does rather than hand-writing the expected number.
+        with session_factory() as session:
+            for run in session.execute(select(Run)).scalars():
+                service._recalculate_run_cost(session, run.id)
+            session.commit()
+
         with session_factory() as session:
             summary = service.get_overview_summary(
                 session,
@@ -1097,3 +1108,115 @@ class IntegrationFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunCostTotalTests(unittest.TestCase):
+    """Per-run spend is stored on the run, not re-derived from raw outputs.
+
+    The Overview used to sum four float columns by loading every ``Output`` row —
+    full ORM objects carrying the multi-KB LLM responses — on every page view.
+    """
+
+    def _fixture(self):
+        engine = build_engine("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(
+            bind=engine, autoflush=False, autocommit=False, expire_on_commit=False
+        )
+        service = RunService(
+            build_settings("sqlite+pysqlite:///:memory:"), session_factory, FakeLLMClient()
+        )
+        return service, session_factory
+
+    def _run_with_costs(self, session, user_id):
+        run = Run(
+            user_id=user_id, keyword="k", domain="example.com", brand="b", prompt="p",
+            status="running", total_iterations=3, completed_iterations=3,
+        )
+        session.add(run)
+        session.flush()
+        session.add_all([
+            Output(user_id=user_id, run_id=run.id, iteration_number=1,
+                   openai_generation_cost_usd=0.01, gemini_generation_cost_usd=0.02,
+                   grok_generation_cost_usd=0.03, gemini_analysis_cost_usd=0.04),
+            Output(user_id=user_id, run_id=run.id, iteration_number=2,
+                   openai_generation_cost_usd=0.05, gemini_analysis_cost_usd=None),
+            RunResult(user_id=user_id, run_id=run.id, gemini_sentiment_cost_usd=0.005),
+        ])
+        session.commit()
+        return run.id
+
+    def test_completing_a_run_stores_its_total(self) -> None:
+        service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._run_with_costs(session, user_id)
+
+        service._mark_run_completed(run_id)
+
+        with session_factory() as session:
+            run = session.get(Run, run_id)
+            # outputs 0.01+0.02+0.03+0.04 and 0.05, plus 0.005 sentiment;
+            # a None cost counts as zero rather than blowing up the sum.
+            self.assertAlmostEqual(run.total_cost_usd, 0.155)
+            self.assertEqual(run.status, "completed")
+
+    def test_failed_and_stopped_runs_also_store_their_total(self) -> None:
+        for terminal in ("failed", "stopped"):
+            service, session_factory = self._fixture()
+            user_id = uuid.uuid4()
+            with session_factory() as session:
+                run_id = self._run_with_costs(session, user_id)
+
+            if terminal == "failed":
+                service._mark_run_failed(run_id, RuntimeError("boom"))
+            else:
+                service._mark_run_stopped(run_id)
+
+            with session_factory() as session:
+                run = session.get(Run, run_id)
+                self.assertAlmostEqual(run.total_cost_usd, 0.155, msg=terminal)
+                self.assertEqual(run.status, terminal)
+
+    def test_total_survives_the_raw_outputs_being_cleaned_up(self) -> None:
+        """cleanup_old_outputs() deletes output rows after the retention window.
+
+        Costs used to live only on those rows, so cleaning them silently zeroed
+        the historical spend. The stored total must outlive them.
+        """
+        service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._run_with_costs(session, user_id)
+        service._mark_run_completed(run_id)
+
+        with session_factory() as session:
+            session.execute(delete(Output).where(Output.run_id == run_id))
+            session.commit()
+            self.assertAlmostEqual(session.get(Run, run_id).total_cost_usd, 0.155)
+
+    def test_recalculating_is_idempotent(self) -> None:
+        service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._run_with_costs(session, user_id)
+        with session_factory() as session:
+            first = service._recalculate_run_cost(session, run_id)
+            second = service._recalculate_run_cost(session, run_id)
+            session.commit()
+        # Recomputes rather than accumulates, so the backfill is safe to re-run.
+        self.assertAlmostEqual(first, 0.155)
+        self.assertAlmostEqual(second, 0.155)
+
+    def test_run_with_no_outputs_totals_zero(self) -> None:
+        service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run = Run(user_id=user_id, keyword="k", domain="d", brand="b", prompt="p",
+                      status="running", total_iterations=3, completed_iterations=0)
+            session.add(run)
+            session.commit()
+            run_id = run.id
+        service._mark_run_completed(run_id)
+        with session_factory() as session:
+            self.assertEqual(session.get(Run, run_id).total_cost_usd, 0.0)

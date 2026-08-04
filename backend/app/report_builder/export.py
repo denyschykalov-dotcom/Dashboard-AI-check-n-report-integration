@@ -18,11 +18,16 @@ import typing
 import html
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 
 from backend.app.models import Report, ReportBlock
+from backend.app.report_builder import localization
+from backend.app.report_builder.block_catalog import get_block
 
 
 _TEMPLATE_PATH = Path(__file__).resolve().parent / "report_template.html"
@@ -30,6 +35,10 @@ _TEMPLATE_PATH = Path(__file__).resolve().parent / "report_template.html"
 # block_type_key -> template section id. Public: a block only has somewhere to
 # show a comment if it appears here (ai_commentary reads this to decide which
 # sections get a generated comment).
+#
+# The 8 ai_visibility_* blocks all share one section (b15) — a specialist can
+# select several model/window variants at once, and they render as tabs inside
+# that single section rather than one section each.
 SECTION_BY_KEY = {
     "intro_header": "b1",
     "search_industry": "b2",
@@ -45,7 +54,19 @@ SECTION_BY_KEY = {
     "work_completed": "b12",
     "planned_works": "b13",
     "summary": "b14",
+    "ai_visibility_all_1mo": "b15",
+    "ai_visibility_gpt_1mo": "b15",
+    "ai_visibility_gemini_1mo": "b15",
+    "ai_visibility_grok_1mo": "b15",
+    "ai_visibility_all_6mo": "b15",
+    "ai_visibility_gpt_6mo": "b15",
+    "ai_visibility_gemini_6mo": "b15",
+    "ai_visibility_grok_6mo": "b15",
 }
+
+_AI_VISIBILITY_MODEL_ORDER = ["all", "gpt", "gemini", "grok"]
+_AI_VISIBILITY_MODEL_LABELS = {"all": "All models", "gpt": "GPT", "gemini": "Gemini", "grok": "Grok"}
+_AI_VISIBILITY_WINDOW_LABELS = {"last_month": "Last month", "last_6_months": "Last 6 months"}
 
 _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -200,6 +221,7 @@ def _build_data(
     client_domain: str,
     customization: typing.Optional[dict] = None,
     editable: bool = False,
+    language: str = localization.DEFAULT_LANGUAGE,
 ) -> dict:
     ok = {b["block_type_key"]: (b.get("data") or {}) for b in blocks if b.get("status") == "ok"}
     data: dict[str, typing.Any] = {}
@@ -239,12 +261,28 @@ def _build_data(
     chosen = [mode_specs[mode] for mode in _comparison_modes(default_comparison)]
     modes = [mode for mode in chosen if mode["cmp"]] or chosen[:1]
 
+    # Period strings are assembled from month names, so they are localized here
+    # rather than by the template's post-render pass — the Markdown export has no
+    # JS to run, and the <title>/header substitutions happen server-side.
+    lang = localization.normalize_language(language)
+    # Labels that end up as *values* inside DATA (rather than as text in the
+    # template's own markup) are translated here — the post-render pass only sees
+    # rendered text nodes, and it must not rewrite data the report is reporting on.
+    _t = localization.translator(lang)
+
+    def _period(text: str) -> str:
+        return localization.localize_period_label(text, lang)
+
+    for mode in modes:
+        mode["label"] = _period(mode.get("label") or "")
+    lbl = {key: _period(value) for key, value in lbl.items()}
+
     data["meta"] = {
         "client": client_name,
         "domain": client_domain,
-        "period": _long(cur_label),
-        "periodLong": _long(cur_label),
-        "nextPeriodLong": _next_long(cur_label),
+        "period": _period(_long(cur_label)),
+        "periodLong": _period(_long(cur_label)),
+        "nextPeriodLong": _period(_next_long(cur_label)),
         "prepared": prepared,
         "cur": cur_k, "prev": prev_k, "yoy": yoy_k,
         "P": P, "LBL": lbl,
@@ -481,11 +519,57 @@ def _build_data(
         else:
             data["workPlanned"] = planned_items("planned_works")
 
-    # -- SE Ranking (b11) placeholder --
+    # -- SE Ranking (b11) --
+    sr = ok.get("se_ranking_keywords")
     data["seranking"] = {
-        "status": "pending",
-        "note": "SE Ranking integration will be added later.",
-        "keywords": [],
+        "status": "ok" if sr else "unavailable",
+        "note": (sr or {}).get("note", ""),
+        "keywords": (sr or {}).get("keywords", []),
+    }
+
+    # -- AI Visibility (b15) — one section, a tab per selected model, each tab
+    # carrying whichever window(s) (last month / last 6 months) were selected
+    # for that model. A model/window combo that resolved unavailable still gets
+    # an entry (with a reason) so its tab can say so instead of just being blank.
+    models: dict[str, dict] = {}
+    for b in blocks:
+        if SECTION_BY_KEY.get(b.get("block_type_key")) != "b15":
+            continue
+        block_type = get_block(b.get("block_type_key") or "")
+        if block_type is None or block_type.ai_visibility_model is None or block_type.ai_visibility_window is None:
+            continue
+        model = block_type.ai_visibility_model
+        window = block_type.ai_visibility_window
+        entry = models.setdefault(
+            model,
+            {
+                "key": model,
+                "label": _t(_AI_VISIBILITY_MODEL_LABELS.get(model, model)),
+                "windows": {},
+            },
+        )
+        if b.get("status") == "ok":
+            d = b.get("data") or {}
+            entry["windows"][window] = {
+                "status": "ok",
+                "window_label": _t(
+                    d.get("window_label") or _AI_VISIBILITY_WINDOW_LABELS.get(window, window)
+                ),
+                "total_results": d.get("total_results", 0),
+                "brand_matches": d.get("brand_matches", 0),
+                "domain_matches": d.get("domain_matches", 0),
+                "brand_match_rate": d.get("brand_match_rate", 0),
+                "domain_match_rate": d.get("domain_match_rate", 0),
+                "users": d.get("users", 0),
+            }
+        else:
+            entry["windows"][window] = {
+                "status": "unavailable",
+                "window_label": _t(_AI_VISIBILITY_WINDOW_LABELS.get(window, window)),
+                "reason": b.get("unavailable_reason") or "No data.",
+            }
+    data["aiVisibility"] = {
+        "models": [models[key] for key in _AI_VISIBILITY_MODEL_ORDER if key in models]
     }
 
     # -- report chrome: which blocks are selected/available + comments --
@@ -496,18 +580,27 @@ def _build_data(
         sec = SECTION_BY_KEY.get(b.get("block_type_key"))
         if not sec:
             continue
-        block_states[sec] = {
-            "selected": True,
-            "status": b.get("status"),
-            "reason": b.get("unavailable_reason"),
-            "key": b.get("block_type_key"),
-        }
+        # Several ai_visibility_* blocks can share section b15 — once any of
+        # them resolves ok, a later unavailable one must not downgrade it back.
+        existing = block_states.get(sec)
+        if existing is None or existing["status"] != "ok":
+            block_states[sec] = {
+                "selected": True,
+                "status": b.get("status"),
+                "reason": b.get("unavailable_reason"),
+                "key": b.get("block_type_key"),
+            }
         if b.get("comment"):
             comments[sec] = _comment_html(b["comment"])
             comments_raw[sec] = b["comment"]
     data["report"] = {"blocks": block_states, "comments": comments, "commentsRaw": comments_raw}
     data["customization"] = _normalize_customization(customization)
     data["editable"] = bool(editable)
+    data["language"] = lang
+    # The English->target vocabulary the template's post-render pass swaps in.
+    # Empty for English, and empty until the cache is warmed — in both cases the
+    # report simply renders in English.
+    data["i18n"] = localization.load_ui_translations(lang)
 
     return data
 
@@ -632,6 +725,7 @@ def build_report_html(
     client_name: str,
     client_domain: str,
     customization: typing.Optional[dict] = None,
+    language: str = localization.DEFAULT_LANGUAGE,
 ) -> str:
     prepared = (report.updated_at or report.created_at or datetime.utcnow()).date().isoformat()
     return _render_document(
@@ -642,6 +736,7 @@ def build_report_html(
         client_name=client_name,
         client_domain=client_domain,
         customization=customization if customization is not None else _load_json(report.customization),
+        language=language,
     )
 
 
@@ -654,6 +749,7 @@ def build_preview_html(
     client_domain: str,
     customization: typing.Optional[dict] = None,
     editable: bool = False,
+    language: str = localization.DEFAULT_LANGUAGE,
 ) -> str:
     """Render a report from unsaved block payloads (the generate response shape)
     for the in-dashboard live preview. With ``editable`` the report carries the
@@ -667,7 +763,425 @@ def build_preview_html(
         client_domain=client_domain,
         customization=customization,
         editable=editable,
+        language=language,
     )
+
+
+class PdfRenderError(RuntimeError):
+    """Raised for any expected, handled failure to render a report to PDF."""
+
+
+# Headless Chrome/Chromium binary names to look for, in order. Different distros
+# and versions package this under different names (and one CLI flag renamed
+# across Chrome versions, so both spellings are passed below).
+_CHROME_BINARY_CANDIDATES = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium-browser",
+    "chromium",
+]
+
+
+def _find_chrome_binary() -> str:
+    for name in _CHROME_BINARY_CANDIDATES:
+        path = shutil.which(name)
+        if path:
+            return path
+    raise PdfRenderError(
+        "No Chrome/Chromium binary found on this server for PDF export. Install "
+        "google-chrome, google-chrome-stable, chromium, or chromium-browser."
+    )
+
+
+def build_report_pdf(
+    report: Report,
+    blocks: list[ReportBlock],
+    *,
+    client_name: str,
+    client_domain: str,
+    customization: typing.Optional[dict] = None,
+    language: str = localization.DEFAULT_LANGUAGE,
+) -> bytes:
+    """Render the same document as :func:`build_report_html`, then print it to
+    PDF with headless Chrome — the report is JS-rendered (charts, tabs, KPI
+    grids all populate from ``window.DATA`` on load), so a static HTML-to-PDF
+    converter would only ever see the empty template shell.
+    """
+    document = build_report_html(
+        report,
+        blocks,
+        client_name=client_name,
+        client_domain=client_domain,
+        customization=customization,
+        language=language,
+    )
+    chrome = _find_chrome_binary()
+
+    with tempfile.TemporaryDirectory(prefix="report-pdf-") as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        html_path = tmp_path / "report.html"
+        pdf_path = tmp_path / "report.pdf"
+        html_path.write_text(document, encoding="utf-8")
+
+        command = [
+            chrome,
+            "--headless",
+            "--disable-gpu",
+            "--no-sandbox",
+            f"--user-data-dir={tmp_path / 'chrome-profile'}",
+            # Flag was renamed across Chrome versions; passing both is harmless.
+            "--print-to-pdf-no-header",
+            "--no-pdf-header-footer",
+            f"--print-to-pdf={pdf_path}",
+            html_path.as_uri(),
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, timeout=45)
+        except subprocess.TimeoutExpired as error:
+            raise PdfRenderError("Rendering the report to PDF timed out.") from error
+        except OSError as error:
+            raise PdfRenderError(f"Could not run Chrome for PDF export: {error}") from error
+
+        if result.returncode != 0 or not pdf_path.exists():
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()[:500]
+            raise PdfRenderError(f"Chrome failed to render the PDF{f': {stderr}' if stderr else '.'}")
+
+        return pdf_path.read_bytes()
+
+
+# --- Markdown export ----------------------------------------------------------
+#
+# Charts (trend lines, donuts) have no useful Markdown form, so those sections
+# carry the same underlying numbers as tables instead. Otherwise this mirrors
+# the HTML export section-for-section and skips whatever isn't selected or
+# didn't resolve, same as the final client HTML/PDF export.
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(value: str) -> str:
+    return _HTML_TAG_RE.sub("", html.unescape(value or "")).strip()
+
+
+def _md_escape(value: typing.Any) -> str:
+    text = str(value if value is not None else "").replace("|", "\\|").replace("\n", " ").strip()
+    return text or "—"
+
+
+def _md_num(value: typing.Any) -> str:
+    n = _num(value)
+    return f"{int(n):,}" if n == int(n) else f"{n:,.1f}"
+
+
+def _md_pct(value: typing.Any) -> str:
+    return f"{_num(value):.1f}%"
+
+
+def _md_table(headers: list[str], rows: list[list[typing.Any]]) -> str:
+    if not rows:
+        return "_No data._"
+    lines = ["| " + " | ".join(headers) + " |", "|" + "|".join(["---"] * len(headers)) + "|"]
+    for row in rows:
+        lines.append("| " + " | ".join(_md_escape(cell) for cell in row) + " |")
+    return "\n".join(lines)
+
+
+def _period_columns(data: dict) -> list[tuple[str, str]]:
+    meta = data.get("meta") or {}
+    p = meta.get("P") or {}
+    lbl = meta.get("LBL") or {}
+    return [(p[pk], lbl.get(p[pk], p[pk])) for pk in ("cur", "prev", "yoy") if p.get(pk)]
+
+
+def _md_ahrefs_domain(data: dict) -> str:
+    d = data.get("ahrefs") or {}
+    bl = d.get("backlinks") or {}
+    cols = _period_columns(data)
+    metrics = d.get("metrics") or {}
+    headers = ["Metric"] + [label for _, label in cols]
+    rows = [
+        [label] + [_md_num((metrics.get(key) or {}).get(field)) for key, _ in cols]
+        for label, field in (
+            ("Organic keywords", "orgKw"), ("Organic keywords (top 3)", "orgKw13"),
+            ("Paid keywords", "paidKw"), ("Organic traffic", "orgTraffic"),
+            ("Paid traffic", "paidTraffic"), ("Paid pages", "paidPages"),
+        )
+    ]
+    return (
+        f"**Domain Rating:** {_md_num(d.get('domainRating'))} · **Ahrefs Rank:** {_md_num(d.get('ahrefsRank'))}\n\n"
+        f"**Backlinks:** {_md_num(bl.get('live'))} live / {_md_num(bl.get('allTime'))} all-time · "
+        f"**Referring domains:** {_md_num(bl.get('liveRefdomains'))} live / {_md_num(bl.get('allTimeRefdomains'))} all-time\n\n"
+        f"{_md_table(headers, rows)}"
+    )
+
+
+def _md_ahrefs_movers(data: dict) -> str:
+    headers = ["URL", "Traffic", "Prev", "Δ", "Keywords", "Top keyword", "Volume", "Position", "Prev pos."]
+
+    def rows_for(items: list[list]) -> list[list]:
+        return [
+            [r[0], _md_num(r[1]), _md_num(r[2]), _md_num(r[3]), _md_num(r[4]), r[5], _md_num(r[6]), _md_num(r[7]), _md_num(r[8])]
+            for r in items
+        ]
+
+    gainers = _md_table(headers, rows_for(data.get("ahrefsGainers") or []))
+    losers = _md_table(headers, rows_for(data.get("ahrefsLosers") or []))
+    return f"**Top gainers**\n\n{gainers}\n\n**Top losers**\n\n{losers}"
+
+
+def _md_ga4_summary(data: dict) -> str:
+    cols = _period_columns(data)
+    ga4 = data.get("ga4") or {}
+    headers = ["Metric"] + [label for _, label in cols]
+    fields = [
+        ("Sessions", "sessions", _md_num), ("Organic sessions", "organic", _md_num),
+        ("Total users", "users", _md_num), ("New users", "newUsers", _md_num),
+        ("Returning users", "returning", _md_num), ("Engaged sessions", "engaged", _md_num),
+        ("Engagement rate", "engRate", _md_pct), ("Bounce rate", "bounce", _md_pct),
+        ("Avg. session duration (s)", "duration", _md_num), ("Page views", "pageViews", _md_num),
+        ("Pages / session", "pps", _md_num), ("Key events", "keyEvents", _md_num),
+    ]
+    rows = [[label] + [fmt((ga4.get(key) or {}).get(field)) for key, _ in cols] for label, field, fmt in fields]
+    parts = [_md_table(headers, rows)]
+    cur_key = cols[0][0] if cols else ""
+    channels = (data.get("channels") or {}).get(cur_key) or []
+    if channels:
+        parts.append("\n**Channels (current period)**\n")
+        parts.append(_md_table(
+            ["Channel", "Sessions", "Engaged", "Users"],
+            [[c.get("channel", ""), _md_num(c.get("sessions")), _md_num(c.get("engaged")), _md_num(c.get("users"))] for c in channels],
+        ))
+    return "\n".join(parts)
+
+
+def _md_ga4_top_pages(data: dict) -> str:
+    cols = _period_columns(data)
+    cur_key = cols[0][0] if cols else ""
+    pages = (data.get("ga4TopPages") or {}).get(cur_key) or []
+    return _md_table(
+        ["Page", "Sessions", "Engaged", "Key events", "Bounce rate"],
+        [[p.get("page", ""), _md_num(p.get("sessions")), _md_num(p.get("engaged")), _md_num(p.get("keyEvents")), _md_pct(p.get("bounce"))] for p in pages],
+    )
+
+
+def _md_ga4_monetization(data: dict) -> str:
+    cols = _period_columns(data)
+    headers = ["Metric"] + [label for _, label in cols]
+
+    def table_for(section_key: str) -> str:
+        section = data.get(section_key) or {}
+        rows = [
+            [label] + [_md_num((section.get(key) or {}).get(field)) for key, _ in cols]
+            for label, field in (
+                ("Purchases", "purchases"), ("Revenue", "revenue"),
+                ("Add to cart", "addToCart"), ("Checkouts", "checkouts"),
+            )
+        ]
+        return _md_table(headers, rows)
+
+    return f"**Site-wide**\n\n{table_for('ecom')}\n\n**AI-referred traffic**\n\n{table_for('aiEcom')}"
+
+
+def _md_ga4_ai_traffic(data: dict) -> str:
+    cols = _period_columns(data)
+    headers = ["Metric"] + [label for _, label in cols]
+    summary = data.get("aiSummary") or {}
+    rows = [
+        ["AI sessions"] + [_md_num((summary.get(key) or {}).get("sessions")) for key, _ in cols],
+        ["Engaged sessions"] + [_md_num((summary.get(key) or {}).get("engaged")) for key, _ in cols],
+        ["Engagement rate"] + [_md_pct((summary.get(key) or {}).get("engRate")) for key, _ in cols],
+    ]
+    parts = [_md_table(headers, rows)]
+    tools = data.get("aiTools") or []
+    if tools:
+        parts.append("\n**Traffic by AI tool**\n")
+        parts.append(_md_table(
+            ["Source", "Sessions", "Engaged"],
+            [[t.get("source", ""), _md_num(t.get("sessions")), _md_num(t.get("engaged"))] for t in tools],
+        ))
+    pages = data.get("aiTopPages") or []
+    if pages:
+        parts.append("\n**Top landing pages from AI**\n")
+        parts.append(_md_table(
+            ["Page", "Sessions", "Engaged"],
+            [[p.get("page", ""), _md_num(p.get("sessions")), _md_num(p.get("engaged"))] for p in pages],
+        ))
+    return "\n".join(parts)
+
+
+def _md_ai_visibility(data: dict) -> str:
+    models = (data.get("aiVisibility") or {}).get("models") or []
+    if not models:
+        return "_No AI-visibility data selected._"
+    headers = ["Window", "Results checked", "Brand mentions", "Brand %", "Domain mentions", "Domain %"]
+    parts = []
+    for m in models:
+        rows = []
+        for window_key in ("last_month", "last_6_months"):
+            w = (m.get("windows") or {}).get(window_key)
+            if not w:
+                continue
+            if w.get("status") == "ok":
+                rows.append([
+                    w.get("window_label", window_key), _md_num(w.get("total_results")),
+                    _md_num(w.get("brand_matches")), _md_pct(w.get("brand_match_rate")),
+                    _md_num(w.get("domain_matches")), _md_pct(w.get("domain_match_rate")),
+                ])
+            else:
+                rows.append([w.get("window_label", window_key), f"No data — {w.get('reason', '')}", "—", "—", "—", "—"])
+        parts.append(f"**{m.get('label', m.get('key'))}**\n\n{_md_table(headers, rows)}")
+    return "\n\n".join(parts)
+
+
+def _md_gsc_summary(data: dict) -> str:
+    cols = _period_columns(data)
+    headers = ["Metric"] + [label for _, label in cols]
+    gsc = data.get("gsc") or {}
+    rows = [
+        ["Clicks"] + [_md_num((gsc.get(key) or {}).get("clicks")) for key, _ in cols],
+        ["Impressions"] + [_md_num((gsc.get(key) or {}).get("impressions")) for key, _ in cols],
+        ["CTR"] + [_md_pct((gsc.get(key) or {}).get("ctr")) for key, _ in cols],
+        ["Avg. position"] + [_md_num((gsc.get(key) or {}).get("position")) for key, _ in cols],
+    ]
+    parts = [_md_table(headers, rows)]
+    pos = data.get("gscPos") or {}
+    pos_rows = [
+        [label] + [_md_num((pos.get(key) or {}).get(field)) for key, _ in cols]
+        for label, field in (
+            ("Top 3", "top3"), ("Top 5", "top5"), ("Top 10", "top10"),
+            ("Top 20", "top20"), ("Top 50", "top50"), ("Total tracked", "total"),
+        )
+    ]
+    parts.append("\n**Position distribution**\n")
+    parts.append(_md_table(headers, pos_rows))
+    cur_key = cols[0][0] if cols else ""
+    b = (data.get("branded") or {}).get(cur_key) or {}
+    parts.append("\n**Branded vs non-branded (current period)**\n")
+    parts.append(f"Branded clicks: {_md_num(b.get('branded'))} of {_md_num(b.get('total'))} total ({_md_pct(b.get('share'))})")
+    return "\n".join(parts)
+
+
+def _md_gsc_queries(data: dict) -> str:
+    cols = _period_columns(data)
+    cur_key = cols[0][0] if cols else ""
+    queries = (data.get("gscQueries") or {}).get(cur_key) or []
+    pages = (data.get("gscTopPages") or {}).get(cur_key) or []
+    headers = ["Item", "Clicks", "Impressions", "CTR", "Position"]
+    q_table = _md_table(headers, [
+        [q.get("query", ""), _md_num(q.get("clicks")), _md_num(q.get("impressions")), _md_pct(q.get("ctr")), _md_num(q.get("position"))]
+        for q in queries
+    ])
+    p_table = _md_table(headers, [
+        [p.get("page", ""), _md_num(p.get("clicks")), _md_num(p.get("impressions")), _md_pct(p.get("ctr")), _md_num(p.get("position"))]
+        for p in pages
+    ])
+    return f"**Top queries**\n\n{q_table}\n\n**Top pages**\n\n{p_table}"
+
+
+def _md_se_ranking(data: dict) -> str:
+    sr = data.get("seranking") or {}
+    note = (sr.get("note") or "").strip()
+    rows = [[kw[0], _md_num(kw[1]), _md_num(kw[2]), _md_num(kw[3])] for kw in (sr.get("keywords") or [])]
+    table = _md_table(["Keyword", "Volume", "Position", "Previous position"], rows)
+    return (f"_{note}_\n\n" if note else "") + table
+
+
+def _md_work_done(data: dict) -> str:
+    rows = [[r[0], r[1], r[2]] for r in (data.get("workDone") or [])]
+    return _md_table(["Summary", "Task", "ID"], rows)
+
+
+def _md_planned_work(data: dict) -> str:
+    manual = data.get("workPlannedManual")
+    if manual:
+        return _strip_html(manual)
+    items = data.get("workPlanned") or []
+    if not items:
+        return "_No planned work for the next period._"
+    lines = []
+    for item in items:
+        due = f" — due {item.get('due')}" if item.get("due") else ""
+        assignees = ", ".join(a for a in (item.get("assignees") or []) if a)
+        who = f" ({assignees})" if assignees else ""
+        lines.append(f"- **{item.get('name', '')}**{due}{who}: {item.get('description', '')} [#{item.get('taskId', '')}]")
+    return "\n".join(lines)
+
+
+# (section id, title, body builder — None means "raw specialist comment text
+# is the section's own content", used by the two editorial blocks).
+_MD_SECTIONS: list[tuple[str, str, typing.Optional[typing.Callable[[dict], str]]]] = [
+    ("b14", "Summary", None),
+    ("b2", "Search industry", None),
+    ("b3", "Ahrefs — Domain analysis", _md_ahrefs_domain),
+    ("b4", "Ahrefs — Top movers (pages & keywords)", _md_ahrefs_movers),
+    ("b5", "Google Analytics 4", _md_ga4_summary),
+    ("b6", "GA4 — Top landing pages", _md_ga4_top_pages),
+    ("b7", "GA4 — Monetization", _md_ga4_monetization),
+    ("b8", "GA4 — AI Traffic", _md_ga4_ai_traffic),
+    ("b15", "AI Visibility", _md_ai_visibility),
+    ("b9", "Google Search Console", _md_gsc_summary),
+    ("b10", "GSC — Top queries & pages", _md_gsc_queries),
+    ("b11", "SE Ranking — Tracked keywords", _md_se_ranking),
+    ("b12", "Work completed", _md_work_done),
+    ("b13", "Planned works", _md_planned_work),
+]
+
+
+def build_report_markdown(
+    report: Report,
+    blocks: list[ReportBlock],
+    *,
+    client_name: str,
+    client_domain: str,
+    customization: typing.Optional[dict] = None,
+    language: str = localization.DEFAULT_LANGUAGE,
+) -> str:
+    """A Markdown rendering of the report's data and comments — same section
+    selection/availability rules as the HTML/PDF export (an unselected or
+    unavailable section is simply omitted)."""
+    prepared = (report.updated_at or report.created_at or datetime.utcnow()).date().isoformat()
+    data = _build_data(
+        period_label=report.period_label,
+        default_comparison=report.default_comparison,
+        prepared=prepared,
+        blocks=[_block_to_dict(block) for block in blocks],
+        client_name=client_name,
+        client_domain=client_domain,
+        customization=customization if customization is not None else _load_json(report.customization),
+        editable=False,
+        language=language,
+    )
+    # Markdown has no template JS to run the post-render pass, so its section
+    # titles are localized here.
+    t = localization.translator(language)
+    meta = data.get("meta") or {}
+    report_chrome = data.get("report") or {}
+    block_states = report_chrome.get("blocks") or {}
+    comments_raw = report_chrome.get("commentsRaw") or {}
+
+    lines = [
+        f"# {meta.get('client', client_name)} — SEO & Visibility Report — {meta.get('periodLong', '')}",
+        "",
+        f"Domain: {meta.get('domain', client_domain)} · Prepared: {meta.get('prepared', prepared)}",
+        "",
+    ]
+    for sec_id, title, builder in _MD_SECTIONS:
+        state = block_states.get(sec_id)
+        if not state or not state.get("selected") or state.get("status") != "ok":
+            continue
+        lines.append(f"## {t(title)}")
+        lines.append("")
+        comment = (comments_raw.get(sec_id) or "").strip()
+        if builder is None:
+            lines.append(comment or "_No content was written for this section._")
+        else:
+            lines.append(builder(data))
+            if comment:
+                lines.append("")
+                lines.append(f"> {comment}")
+        lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
 
 
 def _render_document(
@@ -680,6 +1194,7 @@ def _render_document(
     client_domain: str,
     customization: typing.Optional[dict],
     editable: bool = False,
+    language: str = localization.DEFAULT_LANGUAGE,
 ) -> str:
     data = _build_data(
         period_label=period_label,
@@ -690,6 +1205,7 @@ def _render_document(
         client_domain=client_domain,
         customization=customization,
         editable=editable,
+        language=language,
     )
 
     data_json = json.dumps(data, ensure_ascii=False)

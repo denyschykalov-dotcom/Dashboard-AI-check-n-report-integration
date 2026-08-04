@@ -6,12 +6,14 @@ developer adds a block type, which is a code change either way.
 
 The catalog covers, per the feature spec (FR-003 / FR-003a / FR-003b):
   * 14 baseline blocks from the OnebyOne report template
-  * 2 bar-chart variants of the two baseline blocks that render a donut chart
-    (GA4 session mix by channel; GSC branded vs non-branded clicks)
   * 8 AI-visibility blocks: {last month, last 6 months} x {all, gpt, gemini, grok}
 
 The catalog size is a floor, not a ceiling — new entries are added by extending
 ``BLOCK_CATALOG`` below.
+
+Two bar-chart variants (``ga4_session_mix_bar``, ``gsc_branded_bar``) are
+*retired*: still resolvable so historical reports and saved selections keep
+working, but no longer offered for selection. See ``_RETIRED_BLOCKS``.
 """
 
 from __future__ import annotations
@@ -105,19 +107,31 @@ _BASELINE_BLOCKS: list[BlockType] = [
     BlockType("summary", "Summary", "editorial", "text"),
 ]
 
-# --- 2 bar-chart variants of the donut baseline blocks ------------------------
-_BAR_VARIANT_BLOCKS: list[BlockType] = [
+# --- retired: 2 bar-chart variants of the donut baseline blocks ---------------
+# These were selectable, but they have no entry in ``export.SECTION_BY_KEY``, so
+# a report that included one silently dropped it: no section rendered, and
+# ``ai_commentary.commentable_block_keys`` skipped it, so Claude was never asked
+# for its comment. The bar-vs-donut choice these duplicated is already handled by
+# the per-chart-slot variant picker in ``customization.charts``, so they are no
+# longer offered — but they stay resolvable so historical reports and saved
+# selections don't break.
+_RETIRED_BLOCKS: list[BlockType] = [
     BlockType("ga4_session_mix_bar", "GA4 — Session mix by channel (bar chart)", "ga4_sheet", "bar"),
     BlockType("gsc_branded_bar", "GSC — Branded vs non-branded clicks (bar chart)", "gsc_sheet", "bar"),
 ]
 
+RETIRED_BLOCK_KEYS: frozenset[str] = frozenset(block.key for block in _RETIRED_BLOCKS)
+
+# What a specialist can put in a report. Retired blocks are deliberately absent.
 BLOCK_CATALOG: list[BlockType] = [
     *_BASELINE_BLOCKS,
-    *_BAR_VARIANT_BLOCKS,
     *_ai_visibility_blocks(),
 ]
 
-_BLOCK_BY_KEY: dict[str, BlockType] = {block.key: block for block in BLOCK_CATALOG}
+# Lookup covers retired blocks too, so resolving an old report still works.
+_BLOCK_BY_KEY: dict[str, BlockType] = {
+    block.key: block for block in (*BLOCK_CATALOG, *_RETIRED_BLOCKS)
+}
 
 
 def get_block(key: str) -> typing.Optional[BlockType]:

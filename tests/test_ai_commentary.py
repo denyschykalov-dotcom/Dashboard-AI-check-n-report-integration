@@ -37,6 +37,7 @@ def build_settings(*, anthropic_api_key="test-key", summary_max_chars=1500) -> S
         google_sheets_credentials_file=None,
         google_sheets_client_folder_id=None,
         ahrefs_api_token=None,
+        seranking_api_key=None,
         report_builder_secret_key=None,
         openai_api_key=None,
         gemini_api_key=None,
@@ -62,6 +63,8 @@ def build_settings(*, anthropic_api_key="test-key", summary_max_chars=1500) -> S
         final_sentiment_prompt_file=Path("final-sentiment.txt"),
         report_block_comment_prompt_file=Path("report-block-comment.txt"),
         report_summary_prompt_file=Path("report-summary.txt"),
+        report_translate_prompt_file=Path("report-translate.txt"),
+        report_search_industry_prompt_file=Path("report-industry.txt"),
     )
 
 
@@ -119,6 +122,63 @@ class CommentableBlocksTests(unittest.TestCase):
         blocks = [{"block_type_key": key, "status": "ok"} for key in report_export.SECTION_BY_KEY]
         for key in commentable_block_keys(blocks):
             self.assertIn(key, report_export.SECTION_BY_KEY)
+
+    def test_search_industry_is_not_an_analyst_comment(self):
+        """It is editorial scene-setting written by its own web-searched call.
+
+        Left in the comment run it would get a comment *about* a section that has
+        no data — which is what used to fill it with meta-prose.
+        """
+        blocks = [
+            {"block_type_key": "search_industry", "status": "ok"},
+            {"block_type_key": "ga4_summary", "status": "ok"},
+        ]
+        self.assertEqual(commentable_block_keys(blocks), ["ga4_summary"])
+
+
+class SearchIndustryTextTests(unittest.TestCase):
+    """The web-search write-up: word ceiling, and ignoring the search preamble."""
+
+    def test_trim_to_words_keeps_short_text_untouched(self):
+        text = "Google confirmed no update in July."
+        self.assertEqual(ai_commentary._trim_to_words(text, 150), text)
+
+    def test_trim_to_words_cuts_on_a_sentence_boundary(self):
+        text = " ".join(["word"] * 40) + ". " + " ".join(["tail"] * 40) + "."
+        out = ai_commentary._trim_to_words(text, 45)
+        self.assertTrue(out.endswith("."))
+        self.assertLessEqual(len(out.split()), 45)
+        self.assertNotIn("tail", out)
+
+    def test_trim_to_words_falls_back_to_an_ellipsis(self):
+        out = ai_commentary._trim_to_words(" ".join(["word"] * 200), 150)
+        self.assertEqual(len(out.split()), 150)
+        self.assertTrue(out.endswith("…"))
+
+    def test_answer_text_ignores_the_pre_search_preamble(self):
+        """Only text after the last tool block is the answer.
+
+        A web-search turn narrates before it searches ("I'll look that up…");
+        joining every text block pasted that into the report.
+        """
+        message = types.SimpleNamespace(
+            content=[
+                types.SimpleNamespace(type="text", text="I'll search for that period."),
+                types.SimpleNamespace(type="server_tool_use", name="web_search"),
+                types.SimpleNamespace(type="web_search_tool_result", content=[]),
+                types.SimpleNamespace(type="text", text="In July 2026, Google confirmed no update."),
+            ]
+        )
+        self.assertEqual(
+            AICommentaryClient._answer_text_of(message),
+            "In July 2026, Google confirmed no update.",
+        )
+
+    def test_answer_text_handles_a_turn_with_no_tool_use(self):
+        message = types.SimpleNamespace(
+            content=[types.SimpleNamespace(type="text", text="Just the answer.")]
+        )
+        self.assertEqual(AICommentaryClient._answer_text_of(message), "Just the answer.")
 
 
 class ReportContextTests(unittest.TestCase):

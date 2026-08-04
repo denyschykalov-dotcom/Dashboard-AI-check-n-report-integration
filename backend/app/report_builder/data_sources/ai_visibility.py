@@ -57,16 +57,22 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
     if context.session is None:
         return BlockResult.unavailable("AI-visibility data is not available in this context.")
 
-    client_name = (context.client.name or "").strip().lower()
-    if not client_name:
-        return BlockResult.unavailable("Client has no name to match against AI-visibility projects.")
+    # The client can name the AI-check project explicitly; without one we fall
+    # back to matching a project called the same thing as the client, which only
+    # works when the two happen to be spelled alike.
+    chosen_project = (getattr(context.client, "ai_visibility_project", None) or "").strip()
+    match_on = (chosen_project or context.client.name or "").strip().lower()
+    if not match_on:
+        return BlockResult.unavailable(
+            "No AI-visibility project is set for this client, and it has no name to match on."
+        )
 
     start_at = context.now - timedelta(days=_WINDOW_DAYS[window])
     rows: list[tuple[RunResult, Run]] = list(
         context.session.execute(
             select(RunResult, Run)
             .join(Run, Run.id == RunResult.run_id)
-            .where(func.lower(func.trim(Run.project)) == client_name)
+            .where(func.lower(func.trim(Run.project)) == match_on)
         ).all()
     )
     windowed = [
@@ -76,8 +82,17 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
     ]
 
     if not windowed:
+        # Say which project was actually searched — "no runs found" is baffling
+        # when the cause is that the client's name matches no project at all.
+        source = (
+            f"project '{chosen_project}'"
+            if chosen_project
+            else f"a project named after this client ('{context.client.name}')"
+        )
+        hint = "" if chosen_project else " Pick the right AI-visibility project on the client."
         return BlockResult.unavailable(
-            f"No AI-visibility runs found for this client in the selected window ({_WINDOW_LABELS[window]})."
+            f"No AI-visibility runs found for {source} in the selected window "
+            f"({_WINDOW_LABELS[window]}).{hint}"
         )
 
     total = len(windowed)

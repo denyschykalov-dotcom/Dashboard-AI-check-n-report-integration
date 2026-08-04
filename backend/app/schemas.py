@@ -65,6 +65,27 @@ class HistoryForwardResponse(BaseModel):
 class ClientCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     domain: str = Field(min_length=1, max_length=200)
+    # Language this client's reports are delivered in ("en" | "uk"). Unknown
+    # values fall back to English rather than failing the request.
+    report_language: str = "en"
+
+
+class ClientLanguageRequest(BaseModel):
+    """Change the language a client's reports are delivered in."""
+
+    report_language: str = Field(min_length=2, max_length=10)
+
+
+class ClientSettingsRequest(BaseModel):
+    """Per-client links the data sources need.
+
+    Each field is optional so they can be set independently; an empty string
+    clears one (SE Ranking back to "not configured", AI visibility back to
+    matching on the client's name).
+    """
+
+    se_ranking_target: typing.Optional[str] = Field(default=None, max_length=200)
+    ai_visibility_project: typing.Optional[str] = Field(default=None, max_length=200)
 
 
 class GenerateReportRequest(BaseModel):
@@ -147,6 +168,9 @@ class ReportAiRequest(BaseModel):
     # Only used by the summary call: a summary the specialist already drafted, to
     # be polished rather than replaced.
     existing_summary: str = ""
+    # Only used by the summary call: an optional specialist instruction for this
+    # regeneration (e.g. "focus more on the YoY traffic gain").
+    summary_guidance: str = ""
 
 
 class ClickUpTokenRequest(BaseModel):

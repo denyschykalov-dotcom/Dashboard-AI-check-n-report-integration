@@ -11,10 +11,11 @@ import json
 import logging
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from backend.app.models import Client, Report, ReportBlock
+from backend.app.models import Client, Report, ReportBlock, Run
+from backend.app.report_builder import localization
 from backend.app.report_builder.block_catalog import catalog_as_dicts, get_block
 from backend.app.report_builder.data_sources import (
     ahrefs,
@@ -56,18 +57,87 @@ def list_clients(session: Session) -> list[Client]:
     return list(session.execute(select(Client).order_by(Client.name)).scalars())
 
 
-def create_client(session: Session, *, name: str, domain: str, created_by: uuid.UUID) -> Client:
+def create_client(
+    session: Session,
+    *,
+    name: str,
+    domain: str,
+    created_by: uuid.UUID,
+    report_language: typing.Optional[str] = None,
+) -> Client:
     cleaned_name = (name or "").strip()
     cleaned_domain = (domain or "").strip()
     if not cleaned_name:
         raise ValueError("Client name is required.")
     if not cleaned_domain:
         raise ValueError("Client domain is required.")
-    client = Client(name=cleaned_name, domain=cleaned_domain, created_by=created_by)
+    client = Client(
+        name=cleaned_name,
+        domain=cleaned_domain,
+        created_by=created_by,
+        report_language=localization.normalize_language(report_language),
+    )
     session.add(client)
     session.commit()
     session.refresh(client)
     return client
+
+
+def set_client_language(
+    session: Session, *, client_id: uuid.UUID, report_language: str
+) -> Client:
+    """Change the language this client's reports are delivered in."""
+    client = _get_client(session, client_id)
+    client.report_language = localization.normalize_language(report_language)
+    session.commit()
+    session.refresh(client)
+    return client
+
+
+def update_client_settings(
+    session: Session,
+    *,
+    client_id: uuid.UUID,
+    se_ranking_target: typing.Optional[str] = None,
+    ai_visibility_project: typing.Optional[str] = None,
+) -> Client:
+    """Set the per-client links this client's data sources need.
+
+    Both are cleared by passing an empty string — ``se_ranking_target`` back to
+    "not configured", ``ai_visibility_project`` back to matching on the client's
+    name. ``None`` means "leave this one alone", so each field can be updated
+    independently.
+    """
+    client = _get_client(session, client_id)
+    if se_ranking_target is not None:
+        client.se_ranking_target = se_ranking_target.strip() or None
+    if ai_visibility_project is not None:
+        client.ai_visibility_project = ai_visibility_project.strip() or None
+    session.commit()
+    session.refresh(client)
+    return client
+
+
+def list_ai_visibility_projects(session: Session) -> list[dict[str, object]]:
+    """Every AI-check project that has runs, so a client can be pointed at one.
+
+    Cross-user on purpose: a client's visibility shouldn't depend on which staff
+    member ran the checks, matching how the blocks themselves aggregate.
+    """
+    rows = session.execute(
+        select(
+            func.trim(Run.project).label("project"),
+            func.count().label("runs"),
+            func.max(Run.created_at).label("last_run_at"),
+        )
+        .where(Run.project.is_not(None), func.trim(Run.project) != "")
+        .group_by(func.trim(Run.project))
+        .order_by(func.max(Run.created_at).desc())
+    ).all()
+    return [
+        {"project": project, "runs": int(runs), "last_run_at": last_run_at}
+        for project, runs, last_run_at in rows
+    ]
 
 
 def _get_client(session: Session, client_id: uuid.UUID) -> Client:
@@ -357,6 +427,8 @@ def serialize_client(client: Client) -> dict[str, object]:
         "ga4_sheet_id": client.ga4_sheet_id,
         "clickup_list_id": client.clickup_list_id,
         "se_ranking_target": client.se_ranking_target,
+        "ai_visibility_project": client.ai_visibility_project,
+        "report_language": localization.normalize_language(client.report_language),
         "created_at": client.created_at,
     }
 

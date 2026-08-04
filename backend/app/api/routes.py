@@ -16,6 +16,7 @@ from backend.app.db import SessionLocal, get_db_session
 from backend.app.models import Client, Profile
 from backend.app.report_builder import ai_commentary
 from backend.app.report_builder import export as report_export
+from backend.app.report_builder import localization
 from backend.app.report_builder import selections_service as report_selections_service
 from backend.app.report_builder import service as report_service
 from backend.app.report_builder import settings_service as report_settings_service
@@ -25,6 +26,8 @@ from backend.app.schemas import (
     BulkRunActionResponse,
     ClickUpTokenRequest,
     ClientCreateRequest,
+    ClientLanguageRequest,
+    ClientSettingsRequest,
     DraftAppendPayload,
     DraftPayload,
     GenerateReportRequest,
@@ -557,6 +560,24 @@ def clear_clickup_token(
     return report_settings_service.get_status(session, current_user.user_id)
 
 
+def _client_language(client: Client) -> str:
+    """The client's report language, with its UI vocabulary guaranteed translated.
+
+    Reports are authored in English and localized on the way out. The static
+    vocabulary (section titles, table headers, month names) is translated once per
+    language and cached, so this is a no-op after the first non-English render —
+    but it has to happen before the template is built, because rendering itself
+    must never make an API call. Failures are swallowed inside
+    ``ensure_ui_translations``: an untranslated label falls back to English.
+    """
+    language = localization.normalize_language(client.report_language)
+    if localization.needs_translation(language) and localization.missing_ui_strings(language):
+        ai_client = get_ai_commentary_client()
+        if ai_client.is_configured:
+            localization.ensure_ui_translations(language, ai_client.translate_ui_strings)
+    return language
+
+
 @router.get("/report-builder/clients")
 def list_report_clients(
     session: Session = Depends(get_db_session),
@@ -578,9 +599,60 @@ def create_report_client(
             name=payload.name,
             domain=payload.domain,
             created_by=current_user.user_id,
+            report_language=payload.report_language,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    return report_service.serialize_client(client)
+
+
+@router.get("/report-builder/ai-visibility-projects")
+def list_ai_visibility_projects(
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """The AI-check projects that have runs, for pointing a client at one."""
+    return {"projects": report_service.list_ai_visibility_projects(session)}
+
+
+@router.put("/report-builder/clients/{client_id}/settings")
+def update_report_client_settings(
+    client_id: uuid.UUID,
+    payload: ClientSettingsRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """Set the SE Ranking target and/or AI-visibility project for a client."""
+    try:
+        client = report_service.update_client_settings(
+            session,
+            client_id=client_id,
+            se_ranking_target=payload.se_ranking_target,
+            ai_visibility_project=payload.ai_visibility_project,
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return report_service.serialize_client(client)
+
+
+@router.put("/report-builder/clients/{client_id}/language")
+def set_report_client_language(
+    client_id: uuid.UUID,
+    payload: ClientLanguageRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """Set the language this client's reports are delivered in.
+
+    Reports are always built in English; a non-English language adds a Claude
+    translation pass over the report's prose at generate/submit time.
+    """
+    try:
+        client = report_service.set_client_language(
+            session, client_id=client_id, report_language=payload.report_language
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
     return report_service.serialize_client(client)
 
 
@@ -695,6 +767,7 @@ def preview_report(
         client_domain=client.domain,
         customization=payload.customization,
         editable=True,
+        language=_client_language(client),
     )
     return Response(content=document, media_type="text/html")
 
@@ -719,7 +792,12 @@ def write_report_comments(
     blocks = [block.model_dump() for block in payload.blocks]
     ai_client = get_ai_commentary_client()
     block_keys = ai_commentary.commentable_block_keys(blocks)
-    if not block_keys:
+    wants_industry = any(
+        block.get("block_type_key") == ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY
+        and (block.get("status") or "ok") == "ok"
+        for block in blocks
+    )
+    if not block_keys and not wants_industry:
         return {"comments": {}, "model": ai_client.comment_model}
 
     context = ai_commentary.build_report_context(
@@ -733,7 +811,30 @@ def write_report_comments(
         comments = ai_client.generate_block_comments(context=context, block_keys=block_keys)
     except ai_commentary.AICommentaryUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
-    return {"comments": comments, "model": ai_client.comment_model}
+
+    # The "Search industry" section is not a comment on the client's data — it is
+    # the month's Google-search landscape, researched on the web because the
+    # reporting period is normally past the model's training cutoff. It fails soft:
+    # an empty section the analyst fills in beats invented algorithm updates.
+    if wants_industry:
+        try:
+            industry = ai_client.write_search_industry(
+                client_domain=client.domain, period_label=payload.period_label
+            )
+        except ai_commentary.AICommentaryUnavailable as error:
+            logger.warning("ai_search_industry_failed error=%s", error)
+            industry = ""
+        if industry:
+            comments[ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY] = industry
+
+    # Comments are written in English so Claude reasons over the report in one
+    # language, then translated as a second request when the client reads another.
+    # A translation failure leaves the English draft in place rather than losing it.
+    language = _client_language(client)
+    if localization.needs_translation(language) and comments:
+        comments.update(ai_client.translate_report_text(comments, language))
+
+    return {"comments": comments, "model": ai_client.comment_model, "language": language}
 
 
 @router.post("/report-builder/ai/summary")
@@ -762,14 +863,24 @@ def write_report_summary(
     ai_client = get_ai_commentary_client()
     try:
         summary = ai_client.generate_summary(
-            context=context, existing_summary=payload.existing_summary
+            context=context,
+            existing_summary=payload.existing_summary,
+            guidance=payload.summary_guidance,
         )
     except ai_commentary.AICommentaryUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+
+    # Same two-step as the block comments: written in English, then translated.
+    language = _client_language(client)
+    if localization.needs_translation(language):
+        translated = ai_client.translate_report_text({"summary": summary}, language)
+        summary = translated.get("summary") or summary
+
     return {
         "summary": summary,
         "model": ai_client.summary_model,
         "block_type_key": ai_commentary.SUMMARY_BLOCK_KEY,
+        "language": language,
     }
 
 
@@ -829,6 +940,7 @@ def get_report_detail(
 @router.get("/report-builder/reports/{report_id}/export")
 def export_report(
     report_id: uuid.UUID,
+    format: str = Query(default="html", pattern="^(html|pdf|md)$"),
     session: Session = Depends(get_db_session),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> Response:
@@ -840,16 +952,51 @@ def export_report(
     client = session.get(Client, report.client_id)
     client_name = client.name if client else "Client"
     client_domain = client.domain if client else ""
+    # An export is the client-facing artifact, so it is rendered in their language.
+    language = _client_language(client) if client else localization.DEFAULT_LANGUAGE
+    safe_name = "".join(ch if ch.isalnum() else "-" for ch in client_name).strip("-") or "client"
+    filename_base = f"{safe_name}-{report.period_label}-report"
+
+    if format == "md":
+        document = report_export.build_report_markdown(
+            report,
+            blocks,
+            client_name=client_name,
+            client_domain=client_domain,
+            language=language,
+        )
+        return Response(
+            content=document,
+            media_type="text/markdown",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.md"'},
+        )
+
+    if format == "pdf":
+        try:
+            pdf_bytes = report_export.build_report_pdf(
+                report,
+                blocks,
+                client_name=client_name,
+                client_domain=client_domain,
+                language=language,
+            )
+        except report_export.PdfRenderError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.pdf"'},
+        )
+
     document = report_export.build_report_html(
         report,
         blocks,
         client_name=client_name,
         client_domain=client_domain,
+        language=language,
     )
-    safe_name = "".join(ch if ch.isalnum() else "-" for ch in client_name).strip("-") or "client"
-    filename = f"{safe_name}-{report.period_label}-report.html"
     return Response(
         content=document,
         media_type="text/html",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename_base}.html"'},
     )

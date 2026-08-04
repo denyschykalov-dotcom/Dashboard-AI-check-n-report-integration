@@ -2,8 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiRequest } from "../api";
 import { sourceLabel, SOURCE_ORDER } from "./blockCatalog";
+import { REPORT_LANGUAGES } from "./types";
 import type {
   AiCommentsResponse,
+  AiVisibilityProject,
+  AiVisibilityProjectsResponse,
   AiSummaryResponse,
   BlockCatalogResponse,
   Client,
@@ -21,6 +24,7 @@ import type {
   ReportSummary,
   ReportType,
   ReportBlockType,
+  ReportLanguage,
 } from "./types";
 
 type Props = {
@@ -83,6 +87,14 @@ export default function ReportBuilderPage({ token }: Props) {
   const [showCreateClient, setShowCreateClient] = useState(false);
   const [newClientName, setNewClientName] = useState("");
   const [newClientDomain, setNewClientDomain] = useState("");
+  const [newClientLanguage, setNewClientLanguage] = useState<ReportLanguage>("en");
+  const [isSavingLanguage, setIsSavingLanguage] = useState(false);
+
+  // Per-client data-source links. SE Ranking needs a project id, and the
+  // AI-visibility blocks need to know which AI-check project to read.
+  const [aiProjects, setAiProjects] = useState<AiVisibilityProject[]>([]);
+  const [seRankingInput, setSeRankingInput] = useState("");
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
 
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
 
@@ -108,6 +120,9 @@ export default function ReportBuilderPage({ token }: Props) {
   const [editingReportId, setEditingReportId] = useState<string | null>(null);
 
   const [savedReports, setSavedReports] = useState<ReportSummary[]>([]);
+  // `${reportId}:${format}` of the export currently in flight, so only that
+  // one button shows a loading state (PDF rendering takes a few seconds).
+  const [exportingReportId, setExportingReportId] = useState<string | null>(null);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -119,10 +134,21 @@ export default function ReportBuilderPage({ token }: Props) {
   // the page-level error.
   const [aiNotice, setAiNotice] = useState<string | null>(null);
 
+  // Once a report already has a summary, "Save" turns into an explicit
+  // "Regenerate Summary" action that asks for optional guidance first, rather
+  // than silently rewriting the summary on every save.
+  const [showRegenerateSummaryModal, setShowRegenerateSummaryModal] = useState(false);
+  const [summaryGuidance, setSummaryGuidance] = useState("");
+
   const [settings, setSettings] = useState<ReportSettingsStatus | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [clickupTokenInput, setClickupTokenInput] = useState("");
   const [isSavingToken, setIsSavingToken] = useState(false);
+
+  const selectedClient = useMemo(
+    () => clients.find((client) => client.id === selectedClientId) ?? null,
+    [clients, selectedClientId],
+  );
 
   const groupedCatalog = useMemo(() => {
     const groups = new Map<string, ReportBlockType[]>();
@@ -186,6 +212,21 @@ export default function ReportBuilderPage({ token }: Props) {
     setClients(response.clients);
   }, [token]);
 
+  // The AI-check projects that actually have runs, so the picker offers real
+  // options instead of asking the specialist to remember a label.
+  const loadAiProjects = useCallback(async () => {
+    if (!token) return;
+    try {
+      const response = await apiRequest<AiVisibilityProjectsResponse>(
+        "/api/report-builder/ai-visibility-projects",
+        { token },
+      );
+      setAiProjects(response.projects ?? []);
+    } catch {
+      setAiProjects([]); // best-effort: the picker degrades to a free-text state
+    }
+  }, [token]);
+
   const loadSavedReports = useCallback(
     async (clientId: string) => {
       if (!token || !clientId) {
@@ -210,6 +251,7 @@ export default function ReportBuilderPage({ token }: Props) {
         });
         setCatalog(response.blocks);
         await loadClients();
+        await loadAiProjects();
         const settingsResponse = await apiRequest<ReportSettingsStatus>("/api/report-builder/settings", {
           token,
         });
@@ -218,7 +260,12 @@ export default function ReportBuilderPage({ token }: Props) {
         setError(loadError instanceof Error ? loadError.message : "Failed to load the report builder.");
       }
     })();
-  }, [token, loadClients]);
+  }, [token, loadClients, loadAiProjects]);
+
+  // Keep the SE Ranking box in step with whichever client is selected.
+  useEffect(() => {
+    setSeRankingInput(selectedClient?.se_ranking_target ?? "");
+  }, [selectedClient?.id, selectedClient?.se_ranking_target]);
 
   const loadSelection = useCallback(
     async (clientId: string) => {
@@ -385,16 +432,99 @@ export default function ReportBuilderPage({ token }: Props) {
       const client = await apiRequest<Client>("/api/report-builder/clients", {
         method: "POST",
         token,
-        body: { name: newClientName.trim(), domain: newClientDomain.trim() },
+        body: {
+          name: newClientName.trim(),
+          domain: newClientDomain.trim(),
+          report_language: newClientLanguage,
+        },
       });
       await loadClients();
       setSelectedClientId(client.id);
       setShowCreateClient(false);
       setNewClientName("");
       setNewClientDomain("");
+      setNewClientLanguage("en");
       setStatus(`Client "${client.name}" created.`);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Failed to create client.");
+    }
+  }
+
+  /** Persist a per-client data-source link (SE Ranking id / AI-visibility project). */
+  async function saveClientSettings(patch: {
+    se_ranking_target?: string;
+    ai_visibility_project?: string;
+  }) {
+    if (!token || !selectedClientId) return;
+    setError(null);
+    setIsSavingSettings(true);
+    try {
+      const updated = await apiRequest<Client>(
+        `/api/report-builder/clients/${selectedClientId}/settings`,
+        { method: "PUT", token, body: patch },
+      );
+      setClients((current) =>
+        current.map((client) => (client.id === updated.id ? updated : client)),
+      );
+      setStatus(
+        patch.ai_visibility_project !== undefined
+          ? patch.ai_visibility_project
+            ? `AI-visibility data will be read from project “${patch.ai_visibility_project}”.`
+            : "AI-visibility data will fall back to matching the client's name."
+          : patch.se_ranking_target
+            ? "SE Ranking target saved — regenerate to load tracked keywords."
+            : "SE Ranking target cleared.",
+      );
+    } catch (settingsError) {
+      setError(
+        settingsError instanceof Error ? settingsError.message : "Failed to save client settings.",
+      );
+    } finally {
+      setIsSavingSettings(false);
+    }
+  }
+
+  /** Change the language this client's reports are delivered in. */
+  async function handleChangeLanguage(language: ReportLanguage) {
+    if (!token || !selectedClientId) return;
+    setError(null);
+    setIsSavingLanguage(true);
+    // Reflect the change immediately — the preview re-renders from it.
+    setClients((current) =>
+      current.map((client) =>
+        client.id === selectedClientId ? { ...client, report_language: language } : client,
+      ),
+    );
+    try {
+      await apiRequest<Client>(`/api/report-builder/clients/${selectedClientId}/language`, {
+        method: "PUT",
+        token,
+        body: { report_language: language },
+      });
+      await loadClients();
+      const label =
+        REPORT_LANGUAGES.find((option) => option.value === language)?.label ?? language;
+      // The preview renders its labels from the client's language, so re-render it.
+      // Commentary already drafted stays in the language it was written in until
+      // "Rewrite comments" is used — say so rather than let it look like a bug.
+      if (generated) {
+        await refreshPreview(blocksForSave(), generated, customization);
+      }
+      setStatus(
+        language === "en"
+          ? "Reports for this client will be delivered in English."
+          : `Reports for this client will be translated into ${label}.` +
+              (generated
+                ? " Labels updated — use “Rewrite comments” to translate the existing commentary."
+                : ""),
+      );
+    } catch (languageError) {
+      await loadClients();
+      setError(
+        languageError instanceof Error ? languageError.message : "Failed to change report language.",
+      );
+    } finally {
+      setIsSavingLanguage(false);
     }
   }
 
@@ -560,20 +690,14 @@ export default function ReportBuilderPage({ token }: Props) {
         | { source?: string; kind?: string; key?: string | null; value?: unknown }
         | null;
       if (!data || data.source !== "report-preview") return;
+      // The preview only reports notes and chart-type choices now: the accent is
+      // fixed pink and per-panel text sizing was removed, so neither can change.
       if (data.kind === "note" && typeof data.key === "string") {
         const key = data.key;
         setComments((current) => ({ ...current, [key]: String(data.value ?? "") }));
-      } else if (data.kind === "accent") {
-        setCustomization((current) => ({ ...current, accent: String(data.value ?? "") }));
       } else if (data.kind === "chart" && typeof data.key === "string") {
         const key = data.key;
         setCustomization((current) => ({ ...current, charts: { ...current.charts, [key]: String(data.value ?? "") } }));
-      } else if (data.kind === "panel" && typeof data.key === "string") {
-        const key = data.key;
-        setCustomization((current) => ({
-          ...current,
-          panels: { ...current.panels, [key]: data.value as ReportCustomization["panels"][string] },
-        }));
       }
     }
     window.addEventListener("message", onMessage);
@@ -587,7 +711,7 @@ export default function ReportBuilderPage({ token }: Props) {
    * as the final variant. A Claude failure here degrades to saving without a
    * generated summary rather than losing the report.
    */
-  async function handleSave() {
+  async function writeSummaryAndSave(guidance: string) {
     if (!token || !generated || !selectedClientId) return;
     setError(null);
     setStatus(null);
@@ -614,6 +738,7 @@ export default function ReportBuilderPage({ token }: Props) {
             default_comparison: generated.default_comparison,
             blocks: withComments(reportBlocks, comments),
             existing_summary: comments[SUMMARY_BLOCK_KEY] ?? "",
+            summary_guidance: guidance,
           },
         });
         finalComments = { ...comments, [SUMMARY_BLOCK_KEY]: response.summary };
@@ -675,6 +800,72 @@ export default function ReportBuilderPage({ token }: Props) {
     }
   }
 
+  /** First save of a report: writes the summary with no special guidance. */
+  async function handleSave() {
+    await writeSummaryAndSave("");
+  }
+
+  /**
+   * Persist the report exactly as it stands — no Claude, nothing rewritten.
+   *
+   * This is the plain "I edited the text, keep it" action. Regenerating the
+   * summary is a separate, explicit choice: rolling the two together meant every
+   * save overwrote whatever the specialist had just typed into the summary.
+   */
+  async function handleSaveEdits() {
+    if (!token || !generated || !selectedClientId) return;
+    setError(null);
+    setStatus(null);
+    setAiNotice(null);
+    setIsSaving(true);
+    try {
+      const finalBlocks = blocksForSave();
+      if (editingReportId) {
+        await apiRequest<ReportSummary>(`/api/report-builder/reports/${editingReportId}`, {
+          method: "PUT",
+          token,
+          body: {
+            period_label: generated.period_label,
+            default_comparison: generated.default_comparison,
+            customization,
+            blocks: finalBlocks,
+          },
+        });
+      } else {
+        const saved = await apiRequest<ReportSummary>("/api/report-builder/reports", {
+          method: "POST",
+          token,
+          body: {
+            client_id: selectedClientId,
+            period_label: generated.period_label,
+            default_comparison: generated.default_comparison,
+            customization,
+            blocks: finalBlocks,
+          },
+        });
+        setEditingReportId(saved.id);
+      }
+      setStatus("Report saved — your edits were kept as written.");
+      await loadSavedReports(selectedClientId);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Failed to save report.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function openRegenerateSummaryModal() {
+    setSummaryGuidance("");
+    setShowRegenerateSummaryModal(true);
+  }
+
+  /** Re-run the summary (and re-save) with whatever the specialist typed. */
+  async function handleRegenerateSummaryConfirm() {
+    const guidance = summaryGuidance;
+    setShowRegenerateSummaryModal(false);
+    await writeSummaryAndSave(guidance);
+  }
+
   async function handleOpenReport(reportId: string) {
     if (!token) return;
     setError(null);
@@ -717,15 +908,22 @@ export default function ReportBuilderPage({ token }: Props) {
     }
   }
 
-  async function handleExport(reportId: string) {
+  async function handleExport(reportId: string, format: "html" | "pdf" | "md" = "html") {
     if (!token) return;
     setError(null);
+    setExportingReportId(`${reportId}:${format}`);
     try {
-      const response = await fetch(`/api/report-builder/reports/${reportId}/export`, {
+      const response = await fetch(`/api/report-builder/reports/${reportId}/export?format=${format}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
-        throw new Error(`Export failed with ${response.status}`);
+        let detail = "";
+        try {
+          detail = ((await response.json()) as { detail?: string }).detail || "";
+        } catch {
+          // response wasn't JSON (e.g. a plain error) — fall back to the status below
+        }
+        throw new Error(detail || `Export failed with ${response.status}`);
       }
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -733,13 +931,15 @@ export default function ReportBuilderPage({ token }: Props) {
       link.href = url;
       const disposition = response.headers.get("Content-Disposition") || "";
       const match = disposition.match(/filename="?([^"]+)"?/);
-      link.download = match ? match[1] : `report-${reportId}.html`;
+      link.download = match ? match[1] : `report-${reportId}.${format}`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
     } catch (exportError) {
       setError(exportError instanceof Error ? exportError.message : "Failed to export report.");
+    } finally {
+      setExportingReportId(null);
     }
   }
 
@@ -870,6 +1070,95 @@ export default function ReportBuilderPage({ token }: Props) {
             ))}
           </select>
         </div>
+        {selectedClient ? (
+          <label className="field-stack">
+            <span>Report language</span>
+            <select
+              className="auth-input"
+              value={selectedClient.report_language}
+              disabled={isSavingLanguage}
+              onChange={(event) =>
+                void handleChangeLanguage(event.target.value as ReportLanguage)
+              }
+            >
+              {REPORT_LANGUAGES.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <small className="muted">
+              {selectedClient.report_language === "en"
+                ? "Reports are written in English."
+                : "Reports are written in English, then translated by Claude — commentary, summary and labels."}
+            </small>
+          </label>
+        ) : null}
+
+        {selectedClient ? (
+          <>
+            {/* Without a target the SE Ranking block resolves "not configured"
+                and the section is dropped from the report. */}
+            <label className="field-stack">
+              <span>SE Ranking project ID</span>
+              <div className="report-inline-field">
+                <input
+                  className="auth-input"
+                  value={seRankingInput}
+                  onChange={(event) => setSeRankingInput(event.target.value)}
+                  placeholder="e.g. 6941585 — leave empty if not tracked"
+                />
+                <button
+                  className="ghost-btn"
+                  type="button"
+                  disabled={isSavingSettings || seRankingInput === (selectedClient.se_ranking_target ?? "")}
+                  onClick={() => void saveClientSettings({ se_ranking_target: seRankingInput })}
+                >
+                  {isSavingSettings ? "Saving…" : "Save"}
+                </button>
+              </div>
+              <small className="muted">
+                {selectedClient.se_ranking_target
+                  ? "Tracked keywords load from this SE Ranking project."
+                  : "Not set — the SE Ranking section is skipped for this client."}
+              </small>
+            </label>
+
+            {/* AI-visibility data is matched by project name, which rarely equals
+                the client name — so let the specialist pick from what exists. */}
+            <label className="field-stack">
+              <span>AI-visibility project</span>
+              <select
+                className="auth-input"
+                value={selectedClient.ai_visibility_project ?? ""}
+                disabled={isSavingSettings}
+                onChange={(event) =>
+                  void saveClientSettings({ ai_visibility_project: event.target.value })
+                }
+              >
+                <option value="">
+                  {`Auto — match a project named “${selectedClient.name}”`}
+                </option>
+                {aiProjects.map((option) => (
+                  <option key={option.project} value={option.project}>
+                    {`${option.project} — ${option.runs} run${option.runs === 1 ? "" : "s"}`}
+                    {option.last_run_at ? `, last ${option.last_run_at.slice(0, 10)}` : ""}
+                  </option>
+                ))}
+              </select>
+              <small className="muted">
+                {selectedClient.ai_visibility_project
+                  ? `AI Visibility blocks read from “${selectedClient.ai_visibility_project}”.`
+                  : aiProjects.some(
+                        (option) =>
+                          option.project.trim().toLowerCase() === selectedClient.name.trim().toLowerCase(),
+                      )
+                    ? `Matching the project named “${selectedClient.name}”.`
+                    : `No project is named “${selectedClient.name}” — pick one, or the AI Visibility blocks stay empty.`}
+              </small>
+            </label>
+          </>
+        ) : null}
         {showCreateClient ? (
           <div className="report-create-client">
             <label className="field-stack">
@@ -889,6 +1178,20 @@ export default function ReportBuilderPage({ token }: Props) {
                 onChange={(event) => setNewClientDomain(event.target.value)}
                 placeholder="acme.com"
               />
+            </label>
+            <label className="field-stack">
+              <span>Report language</span>
+              <select
+                className="auth-input"
+                value={newClientLanguage}
+                onChange={(event) => setNewClientLanguage(event.target.value as ReportLanguage)}
+              >
+                {REPORT_LANGUAGES.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
             </label>
             <div className="modal-actions">
               <button className="ghost-btn" type="button" onClick={() => setShowCreateClient(false)}>
@@ -1120,13 +1423,14 @@ export default function ReportBuilderPage({ token }: Props) {
           </h3>
           <p className="report-hint">
             Claude has drafted a comment for every section from the whole report's data — they are yours to
-            edit. Change notes and per-panel settings (size, headings, body text, chart type, accent) directly
-            in the preview below. Sections with no data are excluded automatically. These controls are removed
-            from the client version — your settings and notes are kept when you Save.
+            edit. Edit the notes, and switch a section's chart type, directly in the preview below. Sections
+            with no data are excluded automatically. These controls are removed from the client version — your
+            notes and chart choices are kept when you Save.
           </p>
           <p className="report-hint">
-            On Save, Claude reads the finished report and writes the summary at the top, updates the preview
-            with it, and then stores the final version.
+            {editingReportId
+              ? "“Save changes” stores the report exactly as you have edited it — nothing is rewritten. Use “Regenerate summary” only when you want Claude to write the summary again from the current numbers and comments."
+              : "On Submit, Claude reads the finished report and writes the summary at the top, updates the preview with it, and then stores the final version. After that, “Save changes” keeps your edits as written."}
           </p>
 
           {/* The class toggles on the wrapper, never on the iframe's position in the
@@ -1156,10 +1460,23 @@ export default function ReportBuilderPage({ token }: Props) {
             >
               {aiStage === "comments" ? "Claude is writing…" : "↻ Rewrite comments with Claude"}
             </button>
+            {/* Regenerating the summary is its own action, never the only way to
+                save — otherwise every save overwrites the specialist's edits.
+                Before the first submit there is no summary yet, so it is hidden. */}
+            {editingReportId ? (
+              <button
+                className="ghost-btn"
+                type="button"
+                onClick={openRegenerateSummaryModal}
+                disabled={isSaving || aiStage !== null}
+              >
+                {aiStage === "summary" ? "Claude is writing the summary…" : "↻ Regenerate summary"}
+              </button>
+            ) : null}
             <button
               className="primary-btn"
               type="button"
-              onClick={() => void handleSave()}
+              onClick={() => (editingReportId ? void handleSaveEdits() : void handleSave())}
               disabled={isSaving || aiStage !== null}
             >
               {aiStage === "summary"
@@ -1167,7 +1484,7 @@ export default function ReportBuilderPage({ token }: Props) {
                 : isSaving
                   ? "Saving…"
                   : editingReportId
-                    ? "Submit & save changes"
+                    ? "Save changes"
                     : "Submit & save"}
             </button>
           </div>
@@ -1202,8 +1519,29 @@ export default function ReportBuilderPage({ token }: Props) {
                       <button className="ghost-btn" type="button" onClick={() => void handlePreview(report.id)}>
                         Preview
                       </button>
-                      <button className="ghost-btn" type="button" onClick={() => void handleExport(report.id)}>
-                        Export
+                      <button
+                        className="ghost-btn"
+                        type="button"
+                        onClick={() => void handleExport(report.id, "html")}
+                        disabled={exportingReportId === `${report.id}:html`}
+                      >
+                        {exportingReportId === `${report.id}:html` ? "Exporting…" : "Export HTML"}
+                      </button>
+                      <button
+                        className="ghost-btn"
+                        type="button"
+                        onClick={() => void handleExport(report.id, "pdf")}
+                        disabled={exportingReportId === `${report.id}:pdf`}
+                      >
+                        {exportingReportId === `${report.id}:pdf` ? "Exporting…" : "Export PDF"}
+                      </button>
+                      <button
+                        className="ghost-btn"
+                        type="button"
+                        onClick={() => void handleExport(report.id, "md")}
+                        disabled={exportingReportId === `${report.id}:md`}
+                      >
+                        {exportingReportId === `${report.id}:md` ? "Exporting…" : "Export MD"}
                       </button>
                     </td>
                   </tr>
@@ -1212,6 +1550,37 @@ export default function ReportBuilderPage({ token }: Props) {
             </table>
           )}
         </article>
+      ) : null}
+
+      {showRegenerateSummaryModal ? (
+        <div className="modal-backdrop" onClick={() => setShowRegenerateSummaryModal(false)}>
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <p className="eyebrow">Executive summary</p>
+            <h3>Regenerate Summary</h3>
+            <p>
+              Claude will rewrite the summary from the report's current data and comments. Optionally tell it what to
+              change or focus on — leave this blank to just rewrite it as-is.
+            </p>
+            <label className="field-stack">
+              <span>What should Claude change? (optional)</span>
+              <textarea
+                className="auth-input"
+                rows={4}
+                value={summaryGuidance}
+                onChange={(event) => setSummaryGuidance(event.target.value)}
+                placeholder="e.g. Focus more on the year-over-year traffic gain, and mention the new SE Ranking keyword wins."
+              />
+            </label>
+            <div className="modal-actions">
+              <button className="ghost-btn" type="button" onClick={() => setShowRegenerateSummaryModal(false)}>
+                Cancel
+              </button>
+              <button className="primary-btn" type="button" onClick={() => void handleRegenerateSummaryConfirm()}>
+                Regenerate & Save
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </section>
   );

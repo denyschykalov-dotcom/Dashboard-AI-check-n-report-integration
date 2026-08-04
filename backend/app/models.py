@@ -59,6 +59,13 @@ class Run(Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     error_messages: Mapped[typing.Optional[str]] = mapped_column(Text)
+    # Total spend for this run, summed once when it reaches a terminal state.
+    # Stored rather than derived so the Overview never has to read the raw output
+    # rows (which carry the multi-KB LLM responses), and so the figure survives
+    # cleanup_old_outputs() deleting those rows after the retention window.
+    total_cost_usd: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
     )
@@ -104,6 +111,14 @@ class Client(Base):
     ga4_sheet_id: Mapped[typing.Optional[str]] = mapped_column(Text)
     clickup_list_id: Mapped[typing.Optional[str]] = mapped_column(Text)
     se_ranking_target: Mapped[typing.Optional[str]] = mapped_column(Text)
+    # Which AI-check project the AI-visibility blocks read from. NULL falls back
+    # to matching a project whose name equals this client's name.
+    ai_visibility_project: Mapped[typing.Optional[str]] = mapped_column(Text)
+    # Language this client's reports are delivered in ("en" | "uk"). Reports are
+    # always built in English, then translated by Claude when this is not "en".
+    report_language: Mapped[str] = mapped_column(
+        Text, nullable=False, default="en", server_default="en"
+    )
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow

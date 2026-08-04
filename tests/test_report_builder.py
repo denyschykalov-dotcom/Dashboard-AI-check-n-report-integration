@@ -75,7 +75,7 @@ def _seed_ai_run(session, *, project, created_at, gpt_domain=False, gem_brand=Fa
 
 class BlockCatalogTests(unittest.TestCase):
     def test_catalog_has_expected_size_and_unique_keys(self) -> None:
-        self.assertEqual(len(BLOCK_CATALOG), 24)
+        self.assertEqual(len(BLOCK_CATALOG), 22)
         keys = [block.key for block in BLOCK_CATALOG]
         self.assertEqual(len(keys), len(set(keys)))
 
@@ -86,9 +86,25 @@ class BlockCatalogTests(unittest.TestCase):
             self.assertIn(block.ai_visibility_window, {"last_month", "last_6_months"})
             self.assertIn(block.ai_visibility_model, {"all", "gpt", "gemini", "grok"})
 
-    def test_bar_variants_exist_for_donut_blocks(self) -> None:
+    def test_retired_bar_variants_resolve_but_are_not_offered(self) -> None:
+        # Still resolvable, so historical reports and saved selections keep working…
         self.assertIsNotNone(get_block("ga4_session_mix_bar"))
         self.assertIsNotNone(get_block("gsc_branded_bar"))
+        # …but no longer selectable: they have no SECTION_BY_KEY entry, so a report
+        # that included one dropped it silently and never got a Claude comment.
+        offered = {block.key for block in BLOCK_CATALOG}
+        self.assertNotIn("ga4_session_mix_bar", offered)
+        self.assertNotIn("gsc_branded_bar", offered)
+
+    def test_every_offered_block_can_render_a_section(self) -> None:
+        """Guard against re-introducing a phantom block: anything selectable must
+        have somewhere in the template to render."""
+        for block in BLOCK_CATALOG:
+            self.assertIn(
+                block.key,
+                report_export.SECTION_BY_KEY,
+                f"{block.key} has no report section",
+            )
 
 
 class ResolverTests(unittest.TestCase):

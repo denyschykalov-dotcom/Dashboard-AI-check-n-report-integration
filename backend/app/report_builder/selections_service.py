@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.models import ReportSelection
+from backend.app.report_builder.block_catalog import RETIRED_BLOCK_KEYS
 from backend.app.report_builder.data_sources import periods
 from backend.app.utils import utcnow
 
@@ -77,7 +78,9 @@ def _decode_keys(raw: typing.Optional[str]) -> list[str]:
         return []
     if not isinstance(value, list):
         return []
-    return [str(key) for key in value]
+    # Retired blocks are dropped on the way out: a selection saved while they were
+    # still offered would otherwise keep re-adding a block that renders nothing.
+    return [str(key) for key in value if str(key) not in RETIRED_BLOCK_KEYS]
 
 
 def get_selection(

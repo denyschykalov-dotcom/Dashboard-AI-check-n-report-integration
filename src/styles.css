@@ -2264,3 +2264,19 @@ th {
   color: #fff;
   outline: none;
 }
+
+/* SE Ranking target: text box plus its Save button on one line. */
+.report-inline-field {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.report-inline-field input {
+  flex: 1;
+  min-width: 0;
+}
+
+.report-inline-field button {
+  white-space: nowrap;
+}
