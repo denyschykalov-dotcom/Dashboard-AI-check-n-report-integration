@@ -18,9 +18,16 @@ it matters, then explain each metric in a few words. No label, no "WHAT & WHY"
 prefix, no filler opener ("In this section we can see...").
 
 Paragraph 2 (changes): start with the literal word "CHANGES." then give the
-period-over-period movement for the key metrics — month-over-month and, where
-present in the data, year-over-year. Lead with the numbers; one short
+period-over-period movement for the key metrics, using only the comparisons the
+report actually offers — these are listed in `comparisons_offered` (MOM =
+month-over-month, YOY = year-over-year). Lead with the numbers; one short
 interpretive clause per metric is allowed, but keep it factual, not spun.
+
+Never mention a comparison the report does not offer — not even to say it is
+missing. If `comparisons_offered` lists only MOM, the comment must not refer to
+last year at all: the client is reading a report with no year-on-year column, so
+a remark about year-ago data being unavailable is noise about a number they
+never asked to see.
 
 Formatting:
 - Abbreviate large numbers (K/M). Percentages to 1 decimal. Use "pp" for a

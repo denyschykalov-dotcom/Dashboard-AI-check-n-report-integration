@@ -1200,7 +1200,7 @@ export default function ReportBuilderPage({ token }: Props) {
             {/* Without a target the SE Ranking block resolves "not configured"
                 and the section is dropped from the report. */}
             <label className="field-stack">
-              <span>SE Ranking project ID</span>
+              <span>SE Ranking project — ID or domain</span>
               {/* Saves on blur, like the two selects either side of it. A separate
                   Save button here was easy to miss, so a typed id could be lost. */}
               <input
@@ -1216,12 +1216,21 @@ export default function ReportBuilderPage({ token }: Props) {
                 onKeyDown={(event) => {
                   if (event.key === "Enter") event.currentTarget.blur();
                 }}
-                placeholder="e.g. 6941585 — leave empty if not tracked"
+                placeholder="6941585 — or a domain, e.g. tarscoboltedtank.com"
               />
               <small className="muted">
-                {selectedClient.se_ranking_target
-                  ? "Tracked keywords load from this SE Ranking project."
-                  : "Not set — the SE Ranking section is skipped for this client."}
+                {selectedClient.se_ranking_target ? (
+                  <>
+                    Tracked keywords load from the SE Ranking project matching{" "}
+                    <strong>{selectedClient.se_ranking_target}</strong>.
+                  </>
+                ) : (
+                  "Not set — the SE Ranking section is skipped for this client."
+                )}{" "}
+                Accepts the numeric project ID (<code>6941585</code>) or the site's
+                domain or name (<code>tarscoboltedtank.com</code>, <code>tarsco</code>) —
+                matching ignores <code>https://</code>, <code>www.</code> and case.
+                Leave empty if this client isn't tracked in SE Ranking.
               </small>
             </label>
 

@@ -221,6 +221,28 @@ def _block_label(block_key: str) -> str:
     return block.display_name if block else block_key
 
 
+def _drop_comparisons(value: typing.Any, drop_keys: set[str], *, depth: int = 0) -> typing.Any:
+    """Strip comparison data the report isn't showing, at any nesting depth.
+
+    Matches both the suffix convention the resolvers use for sibling series
+    (``channels_yoy``, ``top_events_previous``) and the plain sub-keys inside a
+    ``kpis`` block (``kpis.yoy``). Nothing else is touched.
+    """
+    if not drop_keys or depth >= 8:
+        return value
+    if isinstance(value, dict):
+        out: dict[str, typing.Any] = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            if name in drop_keys or any(name.endswith(f"_{drop}") for drop in drop_keys):
+                continue
+            out[key] = _drop_comparisons(item, drop_keys, depth=depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_drop_comparisons(item, drop_keys, depth=depth + 1) for item in value]
+    return value
+
+
 def build_report_context(
     *,
     client_name: str,
@@ -235,6 +257,20 @@ def build_report_context(
     ``include_comments`` carries the specialist's comments along — off while
     drafting those comments, on for the summary, which has to agree with them.
     """
+    offered = {
+        part.strip().lower() for part in (default_comparison or "").split(",") if part.strip()
+    }
+    # A block's payload always carries both comparisons, whichever the specialist
+    # actually chose — the report just doesn't render the unselected one. Left in
+    # the context the model wrote about it anyway, most visibly by noting there
+    # was "no data for the previous year" on a report with year-on-year switched
+    # off. Drop what the report does not show, so it cannot be commented on.
+    drop_keys: set[str] = set()
+    if "yoy" not in offered:
+        drop_keys |= {"yoy", "yoy_period"}
+    if "mom" not in offered:
+        drop_keys |= {"previous", "previous_period"}
+
     sections: list[dict[str, object]] = []
     for block in blocks:
         key = str(block.get("block_type_key") or "")
@@ -246,7 +282,7 @@ def build_report_context(
             "status": block.get("status") or "ok",
         }
         if entry["status"] == "ok":
-            entry["data"] = _prune(block.get("data") or {})
+            entry["data"] = _prune(_drop_comparisons(block.get("data") or {}, drop_keys))
         else:
             entry["unavailable_reason"] = block.get("unavailable_reason") or ""
         if include_comments:
