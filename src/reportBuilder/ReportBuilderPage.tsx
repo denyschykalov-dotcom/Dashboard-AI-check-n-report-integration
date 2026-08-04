@@ -5,6 +5,7 @@ import { sourceLabel, SOURCE_ORDER } from "./blockCatalog";
 import { REPORT_LANGUAGES } from "./types";
 import type {
   AiCommentsResponse,
+  AiSearchIndustryResponse,
   AiVisibilityProject,
   AiVisibilityProjectsResponse,
   AiSummaryResponse,
@@ -64,9 +65,27 @@ const DEFAULT_CUSTOMIZATION: ReportCustomization = {
 
 // The block whose comment *is* the executive summary at the top of the report.
 const SUMMARY_BLOCK_KEY = "summary";
+// The intro section Claude researches on the web — the slowest call in the flow.
+const SEARCH_INDUSTRY_BLOCK_KEY = "search_industry";
+
+/**
+ * The month the metric blocks actually carry.
+ *
+ * Sheet-backed resolvers report the period they found, which is the newest month
+ * present rather than necessarily the one that was asked for. The exported
+ * report already relabels itself to match; this is so the builder can say why.
+ */
+function actualDataPeriod(blocks: GeneratedBlock[]): string | null {
+  for (const key of ["ga4_summary", "gsc_summary", "ga4_monetization", "ga4_top_pages"]) {
+    const block = blocks.find((item) => item.block_type_key === key && item.status === "ok");
+    const period = (block?.data as { period?: unknown } | null | undefined)?.period;
+    if (typeof period === "string" && period.trim()) return period.trim();
+  }
+  return null;
+}
 
 /** What Claude is doing right now, so the UI can say so instead of just hanging. */
-type AiStage = null | "comments" | "summary";
+type AiStage = null | "comments" | "summary" | "industry";
 
 /** The editorial summary section, added when the specialist didn't select it —
  * Claude's summary needs somewhere to render. */
@@ -597,6 +616,33 @@ export default function ReportBuilderPage({ token }: Props) {
     return response.comments ?? {};
   }
 
+  /**
+   * The month's Google-search context for the intro section.
+   *
+   * Its own request because it is researched with web search and takes about a
+   * minute and a half — far longer than everything else. Folded into the
+   * comments call it held the preview back by two minutes, which read as a blank
+   * page. Returns "" when nothing reliable was found.
+   */
+  async function draftSearchIndustry(
+    report: { period_label: string; default_comparison: string; blocks: GeneratedBlock[] },
+  ): Promise<string> {
+    const response = await apiRequest<AiSearchIndustryResponse>(
+      "/api/report-builder/ai/search-industry",
+      {
+        method: "POST",
+        token,
+        body: {
+          client_id: selectedClientId,
+          period_label: report.period_label,
+          default_comparison: report.default_comparison,
+          blocks: report.blocks,
+        },
+      },
+    );
+    return response.text ?? "";
+  }
+
   async function handleGenerate() {
     if (!token || !selectedClientId || selectedKeys.size === 0) return;
     setError(null);
@@ -621,17 +667,47 @@ export default function ReportBuilderPage({ token }: Props) {
         },
       });
 
-      const nextComments: Record<string, string> = {};
+      let nextComments: Record<string, string> = {};
       response.blocks.forEach((block) => {
         nextComments[block.block_type_key] = "";
       });
 
-      // Claude drafts the section comments *before* the specialist sees the
-      // preview, so what they open is the data with editable commentary already
-      // in place rather than a page of empty note boxes.
+      // Show the report as soon as the data exists. The Claude calls below take
+      // up to two minutes between them, and the preview panel only renders once
+      // `generated` is set — so waiting for them first left the specialist
+      // looking at a blank page with no indication anything was happening.
+      setComments(nextComments);
+      setGenerated(response);
+      setEditingReportId(null);
+      await refreshPreview(withComments(response.blocks, nextComments), response, customization);
+      setIsGenerating(false);
+
+      // A client's GA4/GSC sheet may not have the requested month yet. The
+      // resolvers fall back to the newest month present and the report quietly
+      // relabels itself, so the specialist asks for July and is handed June with
+      // no explanation. Say so rather than let them wonder why it "looks wrong".
+      const dataPeriod = actualDataPeriod(response.blocks);
+      if (dataPeriod && dataPeriod !== response.period_label) {
+        setAiNotice(
+          `This client's GA4/GSC data does not reach ${response.period_label} yet — ` +
+            `the report was built from ${dataPeriod}, and is labelled ${dataPeriod} throughout.`,
+        );
+      }
+
+      // Kick the web research off now rather than after the comments: the two are
+      // independent, and run back to back they'd add up to over two minutes.
+      // `.catch` is attached immediately so a rejection can't go unhandled while
+      // we await the comments first.
+      const industryPending = selectedKeys.has(SEARCH_INDUSTRY_BLOCK_KEY)
+        ? draftSearchIndustry(response).catch(() => null)
+        : Promise.resolve("");
+
+      // Section commentary: fills into the preview already on screen.
       setAiStage("comments");
       try {
-        Object.assign(nextComments, await draftComments(response));
+        nextComments = { ...nextComments, ...(await draftComments(response)) };
+        setComments(nextComments);
+        await refreshPreview(withComments(response.blocks, nextComments), response, customization);
         setStatus("Claude drafted the section comments — review and edit them in the preview.");
       } catch (aiError) {
         setAiNotice(
@@ -643,10 +719,23 @@ export default function ReportBuilderPage({ token }: Props) {
         setAiStage(null);
       }
 
-      setComments(nextComments);
-      setGenerated(response);
-      setEditingReportId(null);
-      await refreshPreview(withComments(response.blocks, nextComments), response, customization);
+      // Search-industry context, started above and collected last so nothing else
+      // ever waits on it.
+      if (selectedKeys.has(SEARCH_INDUSTRY_BLOCK_KEY)) {
+        setAiStage("industry");
+        const industry = await industryPending;
+        setAiStage(null);
+        if (industry === null) {
+          setAiNotice(
+            "Claude could not research this month's search industry. Write that section yourself in the preview.",
+          );
+        } else if (industry) {
+          nextComments = { ...nextComments, [SEARCH_INDUSTRY_BLOCK_KEY]: industry };
+          setComments(nextComments);
+          await refreshPreview(withComments(response.blocks, nextComments), response, customization);
+          setStatus("Claude added this month's search-industry context.");
+        }
+      }
     } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : "Failed to generate report.");
     } finally {
@@ -974,7 +1063,8 @@ export default function ReportBuilderPage({ token }: Props) {
     );
   }
 
-  const canGenerate = Boolean(selectedClientId) && selectedKeys.size > 0 && !isGenerating;
+  const canGenerate =
+    Boolean(selectedClientId) && selectedKeys.size > 0 && !isGenerating && aiStage === null;
 
   return (
     <section className="page active report-builder-page">
@@ -1101,22 +1191,23 @@ export default function ReportBuilderPage({ token }: Props) {
                 and the section is dropped from the report. */}
             <label className="field-stack">
               <span>SE Ranking project ID</span>
-              <div className="report-inline-field">
-                <input
-                  className="auth-input"
-                  value={seRankingInput}
-                  onChange={(event) => setSeRankingInput(event.target.value)}
-                  placeholder="e.g. 6941585 — leave empty if not tracked"
-                />
-                <button
-                  className="ghost-btn"
-                  type="button"
-                  disabled={isSavingSettings || seRankingInput === (selectedClient.se_ranking_target ?? "")}
-                  onClick={() => void saveClientSettings({ se_ranking_target: seRankingInput })}
-                >
-                  {isSavingSettings ? "Saving…" : "Save"}
-                </button>
-              </div>
+              {/* Saves on blur, like the two selects either side of it. A separate
+                  Save button here was easy to miss, so a typed id could be lost. */}
+              <input
+                className="auth-input"
+                value={seRankingInput}
+                disabled={isSavingSettings}
+                onChange={(event) => setSeRankingInput(event.target.value)}
+                onBlur={() => {
+                  if (seRankingInput !== (selectedClient.se_ranking_target ?? "")) {
+                    void saveClientSettings({ se_ranking_target: seRankingInput });
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") event.currentTarget.blur();
+                }}
+                placeholder="e.g. 6941585 — leave empty if not tracked"
+              />
               <small className="muted">
                 {selectedClient.se_ranking_target
                   ? "Tracked keywords load from this SE Ranking project."
@@ -1400,11 +1491,13 @@ export default function ReportBuilderPage({ token }: Props) {
               onClick={() => void handleGenerate()}
               disabled={!canGenerate}
             >
-              {aiStage === "comments" && isGenerating
+              {aiStage === "comments"
                 ? "Claude is writing comments…"
-                : isGenerating
-                  ? "Generating…"
-                  : "Generate Report"}
+                : aiStage === "industry"
+                  ? "Researching the month…"
+                  : isGenerating
+                    ? "Generating…"
+                    : "Generate Report"}
             </button>
           </div>
           {selectedKeys.size === 0 ? (
@@ -1421,6 +1514,13 @@ export default function ReportBuilderPage({ token }: Props) {
             Report preview — period {generated.period_label}
             {editingReportId ? " (editing saved report)" : ""}
           </h3>
+          {aiStage === "comments" || aiStage === "industry" ? (
+            <p className="report-hint">
+              {aiStage === "comments"
+                ? "Claude is drafting the section comments — the report below is already usable, they will appear in a moment."
+                : "Claude is researching this month's search industry on the web. This takes about a minute and a half; everything else is ready."}
+            </p>
+          ) : null}
           <p className="report-hint">
             Claude has drafted a comment for every section from the whole report's data — they are yours to
             edit. Edit the notes, and switch a section's chart type, directly in the preview below. Sections

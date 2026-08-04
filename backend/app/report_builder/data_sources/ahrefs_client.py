@@ -12,10 +12,16 @@ import typing
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+import logging
+
 import httpx
+
+from backend.app.observability import external_call
 
 from backend.app.config import get_settings
 
+
+logger = logging.getLogger("rankberry.data_source.ahrefs")
 
 _API_BASE = "https://api.ahrefs.com/v3/site-explorer"
 
@@ -85,17 +91,20 @@ def _token() -> str:
 def get(endpoint: str, params: dict[str, typing.Any]) -> dict[str, typing.Any]:
     url = f"{_API_BASE}/{endpoint}"
     headers = {"Authorization": f"Bearer {_token()}", "Accept": "application/json"}
-    try:
-        response = httpx.get(url, headers=headers, params=params, timeout=40.0)
-    except httpx.HTTPError as error:
-        raise AhrefsAccessError(f"Could not reach Ahrefs: {error}") from error
+    with external_call(logger, "ahrefs", endpoint) as call:
+        try:
+            response = httpx.get(url, headers=headers, params=params, timeout=40.0)
+        except httpx.HTTPError as error:
+            raise AhrefsAccessError(f"Could not reach Ahrefs: {error}") from error
+        call["status"] = response.status_code
+        call["bytes"] = len(response.content or b"")
 
-    if response.status_code == 401:
-        raise AhrefsAccessError("Ahrefs API rejected the token (401).")
-    if response.status_code == 403:
-        raise AhrefsAccessError("Ahrefs API access denied (403) — check the subscription/plan.")
-    if response.status_code == 429:
-        raise AhrefsAccessError("Ahrefs API rate limit reached (429) — try again later.")
-    if response.status_code != 200:
-        raise AhrefsAccessError(f"Ahrefs API returned {response.status_code}.")
-    return response.json()
+        if response.status_code == 401:
+            raise AhrefsAccessError("Ahrefs API rejected the token (401).")
+        if response.status_code == 403:
+            raise AhrefsAccessError("Ahrefs API access denied (403) — check the subscription/plan.")
+        if response.status_code == 429:
+            raise AhrefsAccessError("Ahrefs API rate limit reached (429) — try again later.")
+        if response.status_code != 200:
+            raise AhrefsAccessError(f"Ahrefs API returned {response.status_code}.")
+        return response.json()

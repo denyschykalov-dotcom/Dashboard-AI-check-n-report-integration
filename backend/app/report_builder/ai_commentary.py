@@ -24,10 +24,12 @@ import typing
 
 import json
 import logging
+import time
 
 import anthropic
 
 from backend.app.config import Settings
+from backend.app.observability import log_event
 from backend.app.report_builder import localization
 from backend.app.report_builder.block_catalog import get_block
 from backend.app.report_builder.export import SECTION_BY_KEY
@@ -678,6 +680,7 @@ class AICommentaryClient:
         if tools:
             kwargs["tools"] = tools
 
+        started = time.perf_counter()
         try:
             if with_fallbacks:
                 # A safety classifier can decline a request outright; opting into
@@ -701,6 +704,24 @@ class AICommentaryClient:
             ) from error
         except anthropic.APIConnectionError as error:
             raise AICommentaryUnavailable(f"Could not reach Claude: {error}") from error
+
+        # Every Claude call, on one line: what it cost in tokens and how long it
+        # took. Without this a slow or expensive call is invisible until it shows
+        # up as a timeout or a bill.
+        usage = getattr(message, "usage", None)
+        log_event(
+            logger,
+            "llm_call",
+            operation=operation,
+            model=model,
+            stop_reason=getattr(message, "stop_reason", None),
+            input_tokens=getattr(usage, "input_tokens", None),
+            output_tokens=getattr(usage, "output_tokens", None),
+            cache_read=getattr(usage, "cache_read_input_tokens", None),
+            max_tokens=max_tokens,
+            tools=len(tools) if tools else 0,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+        )
 
         if getattr(message, "stop_reason", None) == "refusal":
             details = getattr(message, "stop_details", None)

@@ -106,6 +106,13 @@ export type AiCommentsResponse = {
   language?: ReportLanguage;
 };
 
+/** The month's search-landscape intro, researched with web search (~90s). */
+export type AiSearchIndustryResponse = {
+  text: string;
+  block_type_key: string;
+  language?: ReportLanguage;
+};
+
 /** Claude's executive summary, written from the submitted report. */
 export type AiSummaryResponse = {
   summary: string;

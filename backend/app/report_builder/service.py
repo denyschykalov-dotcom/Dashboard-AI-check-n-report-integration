@@ -9,12 +9,14 @@ import typing
 
 import json
 import logging
+import time
 import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.models import Client, Report, ReportBlock, Run
+from backend.app.observability import log_event
 from backend.app.report_builder import localization
 from backend.app.report_builder.block_catalog import catalog_as_dicts, get_block
 from backend.app.report_builder.data_sources import (
@@ -246,6 +248,7 @@ def generate(
                 }
             )
             continue
+        started = time.perf_counter()
         if key == "planned_works" and manual_plan:
             # Manual plan: the specialist typed the upcoming-period plan directly,
             # so skip ClickUp entirely and store the text as the block payload.
@@ -259,6 +262,27 @@ def generate(
                     result = resolver(block, context)
             except Exception as error:  # defensive: a resolver should not raise, but DB/network can
                 result = BlockResult.unavailable(compact_error_message(error))
+
+        # One line per section. This is the record that answers "why is this block
+        # empty?" — which source it came from, how long it took, whether it
+        # resolved, and crucially which period the data actually covers: a sheet
+        # that has not caught up yet silently reports an older month than the one
+        # that was asked for.
+        data_period = (result.data or {}).get("period") if result.data else None
+        log_event(
+            logger,
+            "block_resolved",
+            level=logging.INFO if result.status == "ok" else logging.WARNING,
+            client_id=client_id,
+            block=key,
+            source=block.source,
+            status=result.status,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            requested_period=period_label,
+            data_period=data_period,
+            period_drift=bool(data_period and data_period != period_label),
+            reason=result.unavailable_reason,
+        )
         blocks.append(
             {
                 "block_type_key": key,

@@ -792,12 +792,7 @@ def write_report_comments(
     blocks = [block.model_dump() for block in payload.blocks]
     ai_client = get_ai_commentary_client()
     block_keys = ai_commentary.commentable_block_keys(blocks)
-    wants_industry = any(
-        block.get("block_type_key") == ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY
-        and (block.get("status") or "ok") == "ok"
-        for block in blocks
-    )
-    if not block_keys and not wants_industry:
+    if not block_keys:
         return {"comments": {}, "model": ai_client.comment_model}
 
     context = ai_commentary.build_report_context(
@@ -812,21 +807,6 @@ def write_report_comments(
     except ai_commentary.AICommentaryUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
-    # The "Search industry" section is not a comment on the client's data — it is
-    # the month's Google-search landscape, researched on the web because the
-    # reporting period is normally past the model's training cutoff. It fails soft:
-    # an empty section the analyst fills in beats invented algorithm updates.
-    if wants_industry:
-        try:
-            industry = ai_client.write_search_industry(
-                client_domain=client.domain, period_label=payload.period_label
-            )
-        except ai_commentary.AICommentaryUnavailable as error:
-            logger.warning("ai_search_industry_failed error=%s", error)
-            industry = ""
-        if industry:
-            comments[ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY] = industry
-
     # Comments are written in English so Claude reasons over the report in one
     # language, then translated as a second request when the client reads another.
     # A translation failure leaves the English draft in place rather than losing it.
@@ -835,6 +815,53 @@ def write_report_comments(
         comments.update(ai_client.translate_report_text(comments, language))
 
     return {"comments": comments, "model": ai_client.comment_model, "language": language}
+
+
+@router.post("/report-builder/ai/search-industry")
+def write_search_industry(
+    payload: ReportAiRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """The month's Google-search landscape for the report's intro section.
+
+    Deliberately its own request. It is researched with web search because the
+    reporting month is normally past the model's training cutoff, which makes it
+    by far the slowest call here — around 90 seconds. Bundled into the comments
+    request it delayed the preview by two minutes, so the specialist saw nothing
+    at all while it ran; on its own the preview renders first and this fills in.
+
+    Fails soft: an empty section the analyst writes themselves beats invented
+    algorithm updates in a report a client reads as fact.
+    """
+    client = session.get(Client, payload.client_id)
+    if client is None:
+        raise HTTPException(status_code=404, detail="Client not found.")
+
+    try:
+        text_out = ai_client_search_industry(client, payload.period_label)
+    except ai_commentary.AICommentaryUnavailable as error:
+        logger.warning("ai_search_industry_failed error=%s", error)
+        return {"text": "", "block_type_key": ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY}
+
+    language = _client_language(client)
+    if text_out and localization.needs_translation(language):
+        translated = get_ai_commentary_client().translate_report_text(
+            {ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY: text_out}, language
+        )
+        text_out = translated.get(ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY) or text_out
+
+    return {
+        "text": text_out,
+        "block_type_key": ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY,
+        "language": language,
+    }
+
+
+def ai_client_search_industry(client: Client, period_label: str) -> str:
+    return get_ai_commentary_client().write_search_industry(
+        client_domain=client.domain, period_label=period_label
+    )
 
 
 @router.post("/report-builder/ai/summary")

@@ -9,8 +9,14 @@ from __future__ import annotations
 
 import typing
 
+import logging
+
 import httpx
 
+from backend.app.observability import external_call
+
+
+logger = logging.getLogger("rankberry.data_source.clickup")
 
 _API_BASE = "https://api.clickup.com/api/v2"
 
@@ -21,20 +27,23 @@ class ClickUpAccessError(Exception):
 
 def _get(token: str, path: str, params: typing.Optional[dict] = None) -> dict:
     url = f"{_API_BASE}/{path.lstrip('/')}"
-    try:
-        response = httpx.get(url, headers={"Authorization": token}, params=params or {}, timeout=30.0)
-    except httpx.HTTPError as error:
-        raise ClickUpAccessError(f"Could not reach ClickUp: {error}") from error
+    with external_call(logger, "clickup", path) as call:
+        try:
+            response = httpx.get(url, headers={"Authorization": token}, params=params or {}, timeout=30.0)
+        except httpx.HTTPError as error:
+            raise ClickUpAccessError(f"Could not reach ClickUp: {error}") from error
+        call["status"] = response.status_code
+        call["bytes"] = len(response.content or b"")
 
-    if response.status_code == 401:
-        raise ClickUpAccessError("ClickUp token is invalid or expired (401).")
-    if response.status_code == 403:
-        raise ClickUpAccessError("ClickUp token has no access to that resource (403).")
-    if response.status_code == 429:
-        raise ClickUpAccessError("ClickUp API rate limit reached (429) — try again later.")
-    if response.status_code != 200:
-        raise ClickUpAccessError(f"ClickUp API returned {response.status_code}.")
-    return response.json()
+        if response.status_code == 401:
+            raise ClickUpAccessError("ClickUp token is invalid or expired (401).")
+        if response.status_code == 403:
+            raise ClickUpAccessError("ClickUp token has no access to that resource (403).")
+        if response.status_code == 429:
+            raise ClickUpAccessError("ClickUp API rate limit reached (429) — try again later.")
+        if response.status_code != 200:
+            raise ClickUpAccessError(f"ClickUp API returned {response.status_code}.")
+        return response.json()
 
 
 def verify_token(token: str) -> dict:

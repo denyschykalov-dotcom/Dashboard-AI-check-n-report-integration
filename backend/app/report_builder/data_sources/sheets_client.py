@@ -16,12 +16,18 @@ import typing
 from datetime import date, datetime
 from functools import lru_cache
 
+import logging
+
 import httpx
+
+from backend.app.observability import external_call
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 
 from backend.app.config import PROJECT_ROOT, get_settings
 
+
+logger = logging.getLogger("rankberry.data_source.sheets")
 
 _SHEETS_API_BASE = "https://sheets.googleapis.com/v4/spreadsheets"
 _DRIVE_API_BASE = "https://www.googleapis.com/drive/v3/files"
@@ -77,29 +83,37 @@ def fetch_tab_values(sheet_id: str, tab_names: list[str]) -> dict[str, list[list
     token = _get_token()
     ranges = [f"'{tab}'!A:Z" for tab in tab_names]
     url = f"{_SHEETS_API_BASE}/{sheet_id}/values:batchGet"
-    try:
-        response = httpx.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            params={"ranges": ranges},
-            timeout=20.0,
-        )
-    except httpx.HTTPError as error:
-        raise SheetsAccessError(f"Could not reach Google Sheets: {error}") from error
+    with external_call(logger, "google_sheets", "values.batchGet",
+                       sheet_id=sheet_id, tabs=len(tab_names)) as call:
+        try:
+            response = httpx.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                params={"ranges": ranges},
+                timeout=20.0,
+            )
+        except httpx.HTTPError as error:
+            raise SheetsAccessError(f"Could not reach Google Sheets: {error}") from error
+        call["status"] = response.status_code
+        call["bytes"] = len(response.content or b"")
 
-    if response.status_code == 404:
-        raise SheetsAccessError("Sheet not found — check the client's GA4 sheet ID.")
-    if response.status_code == 403:
-        raise SheetsAccessError("Access denied — share the sheet with the service account.")
-    if response.status_code != 200:
-        raise SheetsAccessError(f"Google Sheets API returned {response.status_code}.")
+        if response.status_code == 404:
+            raise SheetsAccessError("Sheet not found — check the client's GA4 sheet ID.")
+        if response.status_code == 403:
+            raise SheetsAccessError("Access denied — share the sheet with the service account.")
+        if response.status_code != 200:
+            raise SheetsAccessError(f"Google Sheets API returned {response.status_code}.")
 
-    payload = response.json()
-    value_ranges = payload.get("valueRanges", [])
-    return {
-        tab_name: value_ranges[index].get("values", []) if index < len(value_ranges) else []
-        for index, tab_name in enumerate(tab_names)
-    }
+        payload = response.json()
+        value_ranges = payload.get("valueRanges", [])
+        result = {
+            tab_name: value_ranges[index].get("values", []) if index < len(value_ranges) else []
+            for index, tab_name in enumerate(tab_names)
+        }
+        # Row counts per tab are what tell you a section came back empty because
+        # the sheet had nothing, not because the code dropped it.
+        call["rows"] = sum(len(rows) for rows in result.values())
+        return result
 
 
 def list_sheet_tabs(sheet_id: str) -> set[str]:
@@ -112,25 +126,29 @@ def list_sheet_tabs(sheet_id: str) -> set[str]:
 
     token = _get_token()
     url = f"{_SHEETS_API_BASE}/{sheet_id}"
-    try:
-        response = httpx.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            params={"fields": "sheets.properties.title"},
-            timeout=20.0,
-        )
-    except httpx.HTTPError as error:
-        raise SheetsAccessError(f"Could not reach Google Sheets: {error}") from error
+    with external_call(logger, "google_sheets", "spreadsheets.get", sheet_id=sheet_id) as call:
+        try:
+            response = httpx.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                params={"fields": "sheets.properties.title"},
+                timeout=20.0,
+            )
+        except httpx.HTTPError as error:
+            raise SheetsAccessError(f"Could not reach Google Sheets: {error}") from error
+        call["status"] = response.status_code
 
-    if response.status_code == 404:
-        raise SheetsAccessError("Sheet not found — check the client's GA4 sheet ID.")
-    if response.status_code == 403:
-        raise SheetsAccessError("Access denied — share the sheet with the service account.")
-    if response.status_code != 200:
-        raise SheetsAccessError(f"Google Sheets API returned {response.status_code}.")
+        if response.status_code == 404:
+            raise SheetsAccessError("Sheet not found — check the client's GA4 sheet ID.")
+        if response.status_code == 403:
+            raise SheetsAccessError("Access denied — share the sheet with the service account.")
+        if response.status_code != 200:
+            raise SheetsAccessError(f"Google Sheets API returned {response.status_code}.")
 
-    payload = response.json()
-    return {sheet["properties"]["title"] for sheet in payload.get("sheets", [])}
+        payload = response.json()
+        tabs = {sheet["properties"]["title"] for sheet in payload.get("sheets", [])}
+        call["tabs"] = len(tabs)
+        return tabs
 
 
 def resolve_tab_name(available: set[str], aliases: list[str]) -> typing.Optional[str]:
@@ -163,15 +181,17 @@ def find_client_sheet_id(folder_id: str, *, name: str, domain: str) -> typing.Op
         f"'{folder_id}' in parents and "
         "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
     )
-    try:
-        response = httpx.get(
-            _DRIVE_API_BASE,
-            headers={"Authorization": f"Bearer {token}"},
-            params={"q": query, "fields": "files(id,name)", "pageSize": 200},
-            timeout=20.0,
-        )
-    except httpx.HTTPError as error:
-        raise SheetsAccessError(f"Could not reach Google Drive: {error}") from error
+    with external_call(logger, "google_drive", "files.list", folder_id=folder_id) as call:
+        try:
+            response = httpx.get(
+                _DRIVE_API_BASE,
+                headers={"Authorization": f"Bearer {token}"},
+                params={"q": query, "fields": "files(id,name)", "pageSize": 200},
+                timeout=20.0,
+            )
+        except httpx.HTTPError as error:
+            raise SheetsAccessError(f"Could not reach Google Drive: {error}") from error
+        call["status"] = response.status_code
 
     if response.status_code == 403:
         raise SheetsAccessError("Access denied — share the client folder with the service account.")

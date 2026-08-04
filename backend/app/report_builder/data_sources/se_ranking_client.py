@@ -15,9 +15,15 @@ import typing
 
 from urllib.parse import urlparse
 
+import logging
+
 import httpx
 
 from backend.app.config import get_settings
+from backend.app.observability import external_call
+
+
+logger = logging.getLogger("rankberry.data_source.se_ranking")
 
 
 _API_BASE = "https://api.seranking.com/v1/project-management"
@@ -37,20 +43,23 @@ def _token() -> str:
 def _get(path: str, params: typing.Optional[dict[str, typing.Any]] = None) -> typing.Any:
     url = f"{_API_BASE}{path}"
     headers = {"Authorization": f"Token {_token()}", "Accept": "application/json"}
-    try:
-        response = httpx.get(url, headers=headers, params=params or {}, timeout=40.0)
-    except httpx.HTTPError as error:
-        raise SeRankingAccessError(f"Could not reach SE Ranking: {error}") from error
+    with external_call(logger, "se_ranking", path) as call:
+        try:
+            response = httpx.get(url, headers=headers, params=params or {}, timeout=40.0)
+        except httpx.HTTPError as error:
+            raise SeRankingAccessError(f"Could not reach SE Ranking: {error}") from error
+        call["status"] = response.status_code
+        call["bytes"] = len(response.content or b"")
 
-    if response.status_code == 401:
-        raise SeRankingAccessError("SE Ranking API rejected the key (401).")
-    if response.status_code == 403:
-        raise SeRankingAccessError("SE Ranking API access denied (403) — check the subscription/plan.")
-    if response.status_code == 429:
-        raise SeRankingAccessError("SE Ranking API rate limit reached (429) — try again later.")
-    if response.status_code != 200:
-        raise SeRankingAccessError(f"SE Ranking API returned {response.status_code}.")
-    return response.json()
+        if response.status_code == 401:
+            raise SeRankingAccessError("SE Ranking API rejected the key (401).")
+        if response.status_code == 403:
+            raise SeRankingAccessError("SE Ranking API access denied (403) — check the subscription/plan.")
+        if response.status_code == 429:
+            raise SeRankingAccessError("SE Ranking API rate limit reached (429) — try again later.")
+        if response.status_code != 200:
+            raise SeRankingAccessError(f"SE Ranking API returned {response.status_code}.")
+        return response.json()
 
 
 def _normalize(value: str) -> str:
