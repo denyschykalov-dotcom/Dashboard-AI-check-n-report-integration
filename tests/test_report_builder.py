@@ -678,6 +678,56 @@ class ServiceGenerateWithSheetsTests(unittest.TestCase):
         self.assertEqual(by_key["work_completed"]["status"], "ok")
         self.assertEqual(by_key["work_completed"]["data"]["count"], 1)
 
+    def test_clickup_statuses_match_regardless_of_spacing(self) -> None:
+        """ClickUp's own default status is "to do" — with a space.
+
+        Matching the raw label meant a list on the stock workflow produced no
+        planned works at all, and any list writing "To-Do" or "DONE" the same.
+        """
+        for label in ("todo", "to do", "To Do", "TO-DO", "to_do"):
+            self.assertEqual(
+                clickup._status_name({"status": {"status": label}}),
+                clickup._TODO_STATUS_NAME,
+                f"{label!r} should count as the Todo stage",
+            )
+        for label in ("done", "Done", "DONE", " done "):
+            self.assertEqual(
+                clickup._status_name({"status": {"status": label}}),
+                clickup._DONE_STATUS_NAME,
+                f"{label!r} should count as the Done stage",
+            )
+        # Neighbouring stages must still be excluded — "Complete" is the closed
+        # archive stage, not the reportable "Done" one.
+        for label in ("doing", "in progress", "Complete", "backlog", ""):
+            name = clickup._status_name({"status": {"status": label}})
+            self.assertNotIn(name, (clickup._TODO_STATUS_NAME, clickup._DONE_STATUS_NAME))
+
+    def test_planned_works_picks_up_stock_clickup_todo_status(self) -> None:
+        session = _make_session()
+        user_id = uuid.uuid4()
+        client = _client(session, name="Acme Co", domain="acme.com")
+        settings_service.set_clickup_token(session, user_id, "pk_x")
+        tasks = [
+            {"name": "Rewrite category copy", "status": {"status": "to do", "type": "open"},
+             "assignees": []},
+            {"name": "Mid-flight work", "status": {"status": "doing", "type": "custom"},
+             "assignees": []},
+        ]
+        with patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.find_client_list",
+            return_value={"id": "list-1", "name": "acme"},
+        ), patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
+            return_value=tasks,
+        ):
+            result = report_service.generate(
+                session, client_id=client.id, block_keys=["planned_works"], user_id=user_id,
+            )
+        planned = result["blocks"][0]
+        self.assertEqual(planned["status"], "ok")
+        self.assertEqual(planned["data"]["count"], 1, "the 'to do' task must be picked up")
+        self.assertEqual(planned["data"]["tasks"][0]["name"], "Rewrite category copy")
+
 
 class ServiceTests(unittest.TestCase):
     def setUp(self) -> None:

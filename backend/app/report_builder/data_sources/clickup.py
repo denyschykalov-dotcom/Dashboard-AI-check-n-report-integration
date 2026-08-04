@@ -20,17 +20,21 @@ token can't reach it, the block resolves ``unavailable`` (spec FR-006).
 
 from __future__ import annotations
 
+import logging
 import re
 import typing
 
 from datetime import datetime, timezone
 
+from backend.app.observability import log_event
 from backend.app.report_builder import settings_service
 from backend.app.report_builder.block_catalog import BlockType
 from backend.app.report_builder.data_sources import clickup_client
 from backend.app.report_builder.data_sources.clickup_client import ClickUpAccessError
 from backend.app.report_builder.data_sources.base import BlockResult, ResolveContext
 
+
+logger = logging.getLogger("rankberry.data_source.clickup")
 
 _DONE_STATUS_NAME = "done"
 _TODO_STATUS_NAME = "todo"
@@ -154,6 +158,27 @@ def _load_tasks(context: ResolveContext) -> dict[str, object]:
         )
 
     tasks = clickup_client.fetch_tasks(token, matched["id"])
+
+    # Which list was picked, and every status label in it with a count. Status
+    # names are per-list in ClickUp, so when a report shows the wrong tasks the
+    # answer is almost always here: either a list whose name merely contained the
+    # client's, or stages this code does not recognise as done/todo.
+    histogram: dict[str, int] = {}
+    for task in tasks:
+        label = ((task.get("status") or {}).get("status") or "?").strip().lower()
+        histogram[label] = histogram.get(label, 0) + 1
+    log_event(
+        logger,
+        "clickup_list_loaded",
+        client=context.client.name,
+        list_name=matched["name"],
+        list_id=matched["id"],
+        tasks=len(tasks),
+        statuses=",".join(f"{name}:{count}" for name, count in sorted(histogram.items())) or "-",
+        recognised_done=_DONE_STATUS_NAME,
+        recognised_todo=_TODO_STATUS_NAME,
+    )
+
     result = {"list_name": matched["name"], "list_id": matched["id"], "tasks": tasks}
     context.cache[cache_key] = result
     return result
@@ -173,7 +198,15 @@ def _completed_in_period(summary: dict[str, object], period_months: set[tuple[in
 
 
 def _status_name(task: dict) -> str:
-    return ((task.get("status") or {}).get("status") or "").strip().lower()
+    """A task's ClickUp status, normalized for comparison.
+
+    Spaces, hyphens and underscores are stripped, so the stage a list calls
+    "To Do", "to-do" or "TODO" all match the same way. ClickUp's own default
+    status is literally "to do" with a space, so exact-string matching silently
+    returned no planned works at all for any list using the stock workflow.
+    """
+    raw = ((task.get("status") or {}).get("status") or "").strip().lower()
+    return re.sub(r"[\s_\-]+", "", raw)
 
 
 def _done_tasks(tasks: list[dict], period_months: set[tuple[int, int]]) -> list[dict[str, object]]:
@@ -201,12 +234,34 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
 
     tasks = data["tasks"]
     if block.key == "work_completed":
-        items = _done_tasks(tasks, _period_months(context))
+        months = _period_months(context)
+        items = _done_tasks(tasks, months)
+        # A "Done" task still drops out if it was completed outside the report
+        # month, so count both to tell "wrong status" apart from "wrong month".
+        done_any_month = sum(1 for task in tasks if _status_name(task) == _DONE_STATUS_NAME)
+        log_event(
+            logger,
+            "clickup_block",
+            block=block.key,
+            list_name=data["list_name"],
+            tasks_total=len(tasks),
+            status_done=done_any_month,
+            in_period=len(items),
+            period_months=",".join(f"{y}-{m:02d}" for y, m in sorted(months)),
+        )
         return BlockResult.ok(
             {"list_name": data["list_name"], "count": len(items), "tasks": items}
         )
     if block.key == "planned_works":
         items = _todo_tasks(tasks)
+        log_event(
+            logger,
+            "clickup_block",
+            block=block.key,
+            list_name=data["list_name"],
+            tasks_total=len(tasks),
+            status_todo=len(items),
+        )
         return BlockResult.ok(
             {"list_name": data["list_name"], "count": len(items), "tasks": items}
         )

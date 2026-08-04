@@ -629,6 +629,7 @@ def update_report_client_settings(
             client_id=client_id,
             se_ranking_target=payload.se_ranking_target,
             ai_visibility_project=payload.ai_visibility_project,
+            ga4_sheet_id=payload.ga4_sheet_id,
         )
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error

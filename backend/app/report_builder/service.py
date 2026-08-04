@@ -9,6 +9,7 @@ import typing
 
 import json
 import logging
+import re
 import time
 import uuid
 
@@ -102,6 +103,7 @@ def update_client_settings(
     client_id: uuid.UUID,
     se_ranking_target: typing.Optional[str] = None,
     ai_visibility_project: typing.Optional[str] = None,
+    ga4_sheet_id: typing.Optional[str] = None,
 ) -> Client:
     """Set the per-client links this client's data sources need.
 
@@ -115,9 +117,27 @@ def update_client_settings(
         client.se_ranking_target = se_ranking_target.strip() or None
     if ai_visibility_project is not None:
         client.ai_visibility_project = ai_visibility_project.strip() or None
+    if ga4_sheet_id is not None:
+        # Clearing it re-enables the Drive lookup, which caches its guess back
+        # onto the client — fine when the folder holds one sheet per client,
+        # wrong when it holds a live one and an abandoned one.
+        client.ga4_sheet_id = _extract_sheet_id(ga4_sheet_id) or None
     session.commit()
     session.refresh(client)
     return client
+
+
+def _extract_sheet_id(value: str) -> str:
+    """Accept either a bare sheet id or a full Google Sheets URL.
+
+    People copy the address bar, not the id, and a pasted URL that silently
+    became the "id" would fail every fetch with a confusing 404.
+    """
+    text = (value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", text)
+    return match.group(1) if match else text
 
 
 def list_ai_visibility_projects(session: Session) -> list[dict[str, object]]:

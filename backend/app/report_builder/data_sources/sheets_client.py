@@ -20,7 +20,7 @@ import logging
 
 import httpx
 
-from backend.app.observability import external_call
+from backend.app.observability import external_call, log_event
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 
@@ -186,7 +186,7 @@ def find_client_sheet_id(folder_id: str, *, name: str, domain: str) -> typing.Op
             response = httpx.get(
                 _DRIVE_API_BASE,
                 headers={"Authorization": f"Bearer {token}"},
-                params={"q": query, "fields": "files(id,name)", "pageSize": 200},
+                params={"q": query, "fields": "files(id,name,modifiedTime)", "pageSize": 200},
                 timeout=20.0,
             )
         except httpx.HTTPError as error:
@@ -201,6 +201,35 @@ def find_client_sheet_id(folder_id: str, *, name: str, domain: str) -> typing.Op
     files = response.json().get("files", [])
     domain_norm = _normalize(domain)
     name_norm = _normalize(name)
+
+    def matches(f: dict) -> bool:
+        title = _normalize(f.get("name"))
+        if not title:
+            return False
+        if domain_norm and title == domain_norm:
+            return True
+        if name_norm and title == name_norm:
+            return True
+        return bool(domain_norm and (domain_norm in title or title in domain_norm))
+
+    # A folder routinely holds more than one sheet per client — e.g. "partsvu"
+    # alongside an abandoned "partsvu.com". Priority order below picks one, but
+    # nothing in a name says which is still being collected into, so name every
+    # candidate: silently guessing produced reports built from a dead sheet.
+    candidates = [f for f in files if matches(f)]
+    if len(candidates) > 1:
+        log_event(
+            logger,
+            "sheet_lookup_ambiguous",
+            level=logging.WARNING,
+            client=name,
+            domain=domain,
+            candidates=" | ".join(
+                f"{f.get('name')}({f['id'][:8]}…,modified {str(f.get('modifiedTime') or '?')[:10]})"
+                for f in candidates
+            ),
+            hint="set the sheet explicitly on the client if the wrong one is chosen",
+        )
 
     for f in files:
         if domain_norm and _normalize(f.get("name")) == domain_norm:

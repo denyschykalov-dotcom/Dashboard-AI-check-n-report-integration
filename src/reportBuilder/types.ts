@@ -27,6 +27,7 @@ export type Client = {
   id: string;
   name: string;
   domain: string;
+  /** Sheet the GA4/GSC blocks read; null means auto-lookup by name in Drive. */
   ga4_sheet_id: string | null;
   clickup_list_id: string | null;
   se_ranking_target: string | null;

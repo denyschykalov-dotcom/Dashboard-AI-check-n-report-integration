@@ -113,6 +113,7 @@ export default function ReportBuilderPage({ token }: Props) {
   // AI-visibility blocks need to know which AI-check project to read.
   const [aiProjects, setAiProjects] = useState<AiVisibilityProject[]>([]);
   const [seRankingInput, setSeRankingInput] = useState("");
+  const [sheetInput, setSheetInput] = useState("");
   const [isSavingSettings, setIsSavingSettings] = useState(false);
 
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -285,6 +286,10 @@ export default function ReportBuilderPage({ token }: Props) {
   useEffect(() => {
     setSeRankingInput(selectedClient?.se_ranking_target ?? "");
   }, [selectedClient?.id, selectedClient?.se_ranking_target]);
+
+  useEffect(() => {
+    setSheetInput(selectedClient?.ga4_sheet_id ?? "");
+  }, [selectedClient?.id, selectedClient?.ga4_sheet_id]);
 
   const loadSelection = useCallback(
     async (clientId: string) => {
@@ -473,6 +478,7 @@ export default function ReportBuilderPage({ token }: Props) {
   async function saveClientSettings(patch: {
     se_ranking_target?: string;
     ai_visibility_project?: string;
+    ga4_sheet_id?: string;
   }) {
     if (!token || !selectedClientId) return;
     setError(null);
@@ -486,7 +492,11 @@ export default function ReportBuilderPage({ token }: Props) {
         current.map((client) => (client.id === updated.id ? updated : client)),
       );
       setStatus(
-        patch.ai_visibility_project !== undefined
+        patch.ga4_sheet_id !== undefined
+          ? patch.ga4_sheet_id
+            ? "GA4/GSC sheet set — regenerate to pull from it."
+            : "GA4/GSC sheet cleared — it will be looked up by name in Drive again."
+        : patch.ai_visibility_project !== undefined
           ? patch.ai_visibility_project
             ? `AI-visibility data will be read from project “${patch.ai_visibility_project}”.`
             : "AI-visibility data will fall back to matching the client's name."
@@ -1212,6 +1222,46 @@ export default function ReportBuilderPage({ token }: Props) {
                 {selectedClient.se_ranking_target
                   ? "Tracked keywords load from this SE Ranking project."
                   : "Not set — the SE Ranking section is skipped for this client."}
+              </small>
+            </label>
+
+            {/* Without an explicit id the sheet is looked up in Drive by name.
+                A folder holding both "partsvu" and an abandoned "partsvu.com"
+                resolves to whichever the priority order happens to hit, so the
+                report can silently come from a sheet nobody updates any more. */}
+            <label className="field-stack">
+              <span>GA4 / GSC spreadsheet</span>
+              <input
+                className="auth-input"
+                value={sheetInput}
+                disabled={isSavingSettings}
+                onChange={(event) => setSheetInput(event.target.value)}
+                onBlur={() => {
+                  if (sheetInput !== (selectedClient.ga4_sheet_id ?? "")) {
+                    void saveClientSettings({ ga4_sheet_id: sheetInput });
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") event.currentTarget.blur();
+                }}
+                placeholder="Paste the sheet URL or ID — empty to look it up by name"
+              />
+              <small className="muted">
+                {selectedClient.ga4_sheet_id ? (
+                  <>
+                    Reading{" "}
+                    <a
+                      href={`https://docs.google.com/spreadsheets/d/${selectedClient.ga4_sheet_id}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      this spreadsheet
+                    </a>
+                    . Open it to check it has the month you are reporting on.
+                  </>
+                ) : (
+                  "Not set — the sheet is matched by client name in the shared Drive folder."
+                )}
               </small>
             </label>
 

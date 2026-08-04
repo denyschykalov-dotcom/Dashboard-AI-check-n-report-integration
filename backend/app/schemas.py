@@ -86,6 +86,8 @@ class ClientSettingsRequest(BaseModel):
 
     se_ranking_target: typing.Optional[str] = Field(default=None, max_length=200)
     ai_visibility_project: typing.Optional[str] = Field(default=None, max_length=200)
+    # A bare sheet id or a pasted Google Sheets URL; empty restores auto-lookup.
+    ga4_sheet_id: typing.Optional[str] = Field(default=None, max_length=300)
 
 
 class GenerateReportRequest(BaseModel):
