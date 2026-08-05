@@ -147,6 +147,10 @@ export default function ReportBuilderPage({ token }: Props) {
   // `${reportId}:${format}` of the export currently in flight, so only that
   // one button shows a loading state (PDF rendering takes a few seconds).
   const [exportingReportId, setExportingReportId] = useState<string | null>(null);
+  // Deleting a saved report drops it and its blocks for everyone, so it goes
+  // through a confirmation step rather than firing straight off the row button.
+  const [reportPendingDelete, setReportPendingDelete] = useState<ReportSummary | null>(null);
+  const [isDeletingReport, setIsDeletingReport] = useState(false);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -1017,6 +1021,36 @@ export default function ReportBuilderPage({ token }: Props) {
     }
   }
 
+  async function handleDeleteReportConfirm() {
+    if (!token || !reportPendingDelete) return;
+    const target = reportPendingDelete;
+    setError(null);
+    setStatus(null);
+    setIsDeletingReport(true);
+    try {
+      await apiRequest<void>(`/api/report-builder/reports/${target.id}`, {
+        method: "DELETE",
+        token,
+      });
+      setReportPendingDelete(null);
+      // The open editor is a view of that report; keep editing it and "Save"
+      // would 404 against a row that no longer exists.
+      if (editingReportId === target.id) {
+        setEditingReportId(null);
+        setGenerated(null);
+        setPreviewHtml("");
+      }
+      if (selectedClientId) {
+        await loadSavedReports(selectedClientId);
+      }
+      setStatus(`Deleted the ${target.period_label} report.`);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Failed to delete report.");
+    } finally {
+      setIsDeletingReport(false);
+    }
+  }
+
   async function handleExport(reportId: string, format: "html" | "pdf" | "md" = "html") {
     if (!token) return;
     setError(null);
@@ -1730,6 +1764,14 @@ export default function ReportBuilderPage({ token }: Props) {
                       >
                         {exportingReportId === `${report.id}:md` ? "Exporting…" : "Export MD"}
                       </button>
+                      <button
+                        className="ghost-btn danger-btn"
+                        type="button"
+                        onClick={() => setReportPendingDelete(report)}
+                        disabled={isDeletingReport}
+                      >
+                        Delete
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -1737,6 +1779,37 @@ export default function ReportBuilderPage({ token }: Props) {
             </table>
           )}
         </article>
+      ) : null}
+
+      {reportPendingDelete ? (
+        <div className="modal-backdrop" onClick={() => setReportPendingDelete(null)}>
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <p className="eyebrow">Saved reports</p>
+            <h3>Delete this report?</h3>
+            <p>
+              The <strong>{reportPendingDelete.period_label}</strong> report and all of its blocks, comments and
+              summary will be removed for everyone. Already-downloaded exports are unaffected. This cannot be undone.
+            </p>
+            <div className="modal-actions">
+              <button
+                className="ghost-btn"
+                type="button"
+                onClick={() => setReportPendingDelete(null)}
+                disabled={isDeletingReport}
+              >
+                Cancel
+              </button>
+              <button
+                className="primary-btn danger-btn"
+                type="button"
+                onClick={() => void handleDeleteReportConfirm()}
+                disabled={isDeletingReport}
+              >
+                {isDeletingReport ? "Deleting…" : "Delete report"}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {showRegenerateSummaryModal ? (

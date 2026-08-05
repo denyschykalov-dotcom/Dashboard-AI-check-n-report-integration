@@ -13,7 +13,7 @@ import re
 import time
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from backend.app.models import Client, Report, ReportBlock, Run
@@ -447,6 +447,22 @@ def list_reports_for_client(session: Session, client_id: uuid.UUID) -> list[Repo
             select(Report).where(Report.client_id == client_id).order_by(Report.updated_at.desc())
         ).scalars()
     )
+
+
+def delete_report(session: Session, report_id: uuid.UUID) -> None:
+    """Remove a saved report and its blocks.
+
+    The blocks carry no foreign-key cascade, so they go first — the report row
+    is the only handle on them and orphaning them would leak the (often large)
+    ``data_json`` payloads with no way to find them again.
+    """
+    report = session.get(Report, report_id)
+    if report is None:
+        raise LookupError("Report not found.")
+
+    session.execute(delete(ReportBlock).where(ReportBlock.report_id == report_id))
+    session.delete(report)
+    session.commit()
 
 
 def get_report(session: Session, report_id: uuid.UUID) -> tuple[Report, list[ReportBlock]]:

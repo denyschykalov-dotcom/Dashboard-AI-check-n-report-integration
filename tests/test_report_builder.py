@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.db import Base, build_engine
@@ -788,6 +789,43 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(reports), 1)  # no duplicate created
         _, blocks = report_service.get_report(self.session, report.id)
         self.assertEqual(blocks[0].comment, "second")
+
+    def test_delete_removes_the_report_and_its_blocks(self) -> None:
+        client = _client(self.session)
+        keep = report_service.save_report(
+            self.session,
+            client_id=client.id,
+            period_label="2026-05",
+            blocks=[{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": "keep"}],
+            generated_by=uuid.uuid4(),
+        )
+        drop = report_service.save_report(
+            self.session,
+            client_id=client.id,
+            period_label="2026-06",
+            blocks=[
+                {"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": "drop"},
+                {"block_type_key": "ga4_summary", "status": "ok", "data": {"x": 1}, "comment": ""},
+            ],
+            generated_by=uuid.uuid4(),
+        )
+
+        report_service.delete_report(self.session, drop.id)
+
+        remaining = report_service.list_reports_for_client(self.session, client.id)
+        self.assertEqual([report.id for report in remaining], [keep.id])
+        # Blocks have no cascade, so an incomplete delete would leave orphans.
+        orphans = self.session.execute(
+            select(ReportBlock).where(ReportBlock.report_id == drop.id)
+        ).scalars().all()
+        self.assertEqual(orphans, [])
+        # The untouched report keeps its own blocks.
+        _, kept_blocks = report_service.get_report(self.session, keep.id)
+        self.assertEqual([block.comment for block in kept_blocks], ["keep"])
+
+    def test_delete_unknown_report_raises_lookup_error(self) -> None:
+        with self.assertRaises(LookupError):
+            report_service.delete_report(self.session, uuid.uuid4())
 
     def test_save_allows_empty_comments(self) -> None:
         client = _client(self.session)

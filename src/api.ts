@@ -65,5 +65,10 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
     throw new Error(message);
   }
 
+  // 204 responses (e.g. a delete) carry no body, so there is nothing to parse.
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
   return (await response.json()) as T;
 }

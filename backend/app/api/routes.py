@@ -1006,6 +1006,25 @@ def get_report_detail(
     return report_service.serialize_report_detail(report, blocks)
 
 
+@router.delete("/report-builder/reports/{report_id}", status_code=204)
+def delete_report(
+    report_id: uuid.UUID,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
+    try:
+        report_service.delete_report(session, report_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    logger.info(
+        "report_deleted report_id=%s requester_user_id=%s",
+        report_id,
+        current_user.user_id,
+    )
+    return Response(status_code=204)
+
+
 @router.get("/report-builder/reports/{report_id}/export")
 def export_report(
     report_id: uuid.UUID,
