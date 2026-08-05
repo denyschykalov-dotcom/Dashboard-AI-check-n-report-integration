@@ -115,6 +115,10 @@ export default function ReportBuilderPage({ token }: Props) {
   const [seRankingInput, setSeRankingInput] = useState("");
   const [sheetInput, setSheetInput] = useState("");
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  // Blur-saving is invisible by nature, so the field itself has to show state:
+  // accent-highlighted while a typed change is still unsaved, then a brief
+  // confirmation once it lands.
+  const [justSavedField, setJustSavedField] = useState<string | null>(null);
 
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
 
@@ -490,6 +494,12 @@ export default function ReportBuilderPage({ token }: Props) {
       );
       setClients((current) =>
         current.map((client) => (client.id === updated.id ? updated : client)),
+      );
+      const savedField = Object.keys(patch)[0] ?? null;
+      setJustSavedField(savedField);
+      window.setTimeout(
+        () => setJustSavedField((current) => (current === savedField ? null : current)),
+        2500,
       );
       setStatus(
         patch.ga4_sheet_id !== undefined
@@ -1204,7 +1214,9 @@ export default function ReportBuilderPage({ token }: Props) {
               {/* Saves on blur, like the two selects either side of it. A separate
                   Save button here was easy to miss, so a typed id could be lost. */}
               <input
-                className="auth-input"
+                className={`auth-input${
+                  seRankingInput !== (selectedClient.se_ranking_target ?? "") ? " is-unsaved" : ""
+                }`}
                 value={seRankingInput}
                 disabled={isSavingSettings}
                 onChange={(event) => setSeRankingInput(event.target.value)}
@@ -1218,6 +1230,13 @@ export default function ReportBuilderPage({ token }: Props) {
                 }}
                 placeholder="6941585 — or a domain, e.g. tarscoboltedtank.com"
               />
+              {seRankingInput !== (selectedClient.se_ranking_target ?? "") ? (
+                <small className="field-pending">
+                  Unsaved — press Enter or click outside the field to save.
+                </small>
+              ) : justSavedField === "se_ranking_target" ? (
+                <small className="field-saved">Saved.</small>
+              ) : null}
               <small className="muted">
                 {selectedClient.se_ranking_target ? (
                   <>
@@ -1241,7 +1260,9 @@ export default function ReportBuilderPage({ token }: Props) {
             <label className="field-stack">
               <span>GA4 / GSC spreadsheet</span>
               <input
-                className="auth-input"
+                className={`auth-input${
+                  sheetInput !== (selectedClient.ga4_sheet_id ?? "") ? " is-unsaved" : ""
+                }`}
                 value={sheetInput}
                 disabled={isSavingSettings}
                 onChange={(event) => setSheetInput(event.target.value)}
@@ -1255,6 +1276,13 @@ export default function ReportBuilderPage({ token }: Props) {
                 }}
                 placeholder="Paste the sheet URL or ID — empty to look it up by name"
               />
+              {sheetInput !== (selectedClient.ga4_sheet_id ?? "") ? (
+                <small className="field-pending">
+                  Unsaved — press Enter or click outside the field to save.
+                </small>
+              ) : justSavedField === "ga4_sheet_id" ? (
+                <small className="field-saved">Saved.</small>
+              ) : null}
               <small className="muted">
                 {selectedClient.ga4_sheet_id ? (
                   <>

@@ -212,6 +212,47 @@ def get_active_runs(
     return {"run_ids": run_ids, "total_runs": len(run_ids)}
 
 
+_MAX_STATUS_POLL_IDS = 200
+
+
+@router.get("/runs/status")
+def get_run_statuses(
+    ids: str = Query(default="", description="Comma-separated run ids to report progress for."),
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """Progress ticks for the active-run poller — no raw LLM output, by design.
+
+    The poller previously called ``GET /runs/{run_id}`` per active run every few
+    seconds, which shipped every iteration's gpt/gem/grok text out of the
+    database and down to the browser for a banner that renders neither.
+    """
+    run_ids: list[uuid.UUID] = []
+    for raw_id in ids.split(","):
+        candidate = raw_id.strip()
+        if not candidate:
+            continue
+        try:
+            run_ids.append(uuid.UUID(candidate))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid run id: {candidate}") from None
+
+    if len(run_ids) > _MAX_STATUS_POLL_IDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many run ids requested (max {_MAX_STATUS_POLL_IDS}).",
+        )
+
+    service = get_run_service()
+    runs = service.list_run_statuses(
+        session,
+        user_id=current_user.user_id,
+        run_ids=run_ids,
+        is_admin=current_user.is_admin,
+    )
+    return {"runs": runs, "total_runs": len(runs)}
+
+
 @router.get("/projects")
 def get_user_projects(
     session: Session = Depends(get_db_session),

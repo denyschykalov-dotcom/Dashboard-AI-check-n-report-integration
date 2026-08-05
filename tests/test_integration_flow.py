@@ -4,7 +4,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, event, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool, QueuePool
 
@@ -1220,3 +1220,104 @@ class RunCostTotalTests(unittest.TestCase):
         service._mark_run_completed(run_id)
         with session_factory() as session:
             self.assertEqual(session.get(Run, run_id).total_cost_usd, 0.0)
+
+
+class RunStatusPollTests(unittest.TestCase):
+    """The active-run poller reads progress only, never the raw LLM outputs.
+
+    It ticks every few seconds per open tab, so pulling ``Output`` rows (each
+    carrying multi-KB gpt/gem/grok responses) for a banner that shows only a
+    status tag and an iteration counter was the bulk of the database egress.
+    """
+
+    def _fixture(self):
+        engine = build_engine("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(
+            bind=engine, autoflush=False, autocommit=False, expire_on_commit=False
+        )
+        service = RunService(
+            build_settings("sqlite+pysqlite:///:memory:"), session_factory, FakeLLMClient()
+        )
+        return engine, service, session_factory
+
+    def _seed_run(self, session, user_id, *, status="running", keyword="k"):
+        run = Run(
+            user_id=user_id, keyword=keyword, domain="example.com", brand="b", prompt="p",
+            status=status, total_iterations=3, completed_iterations=1,
+        )
+        session.add(run)
+        session.flush()
+        session.add(
+            Output(
+                user_id=user_id, run_id=run.id, iteration_number=1,
+                gpt_output="x" * 5000, gem_output="y" * 5000, grok_output="z" * 5000,
+            )
+        )
+        session.commit()
+        return run.id
+
+    def test_status_poll_returns_progress_fields_only(self) -> None:
+        _, service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._seed_run(session, user_id)
+
+        with session_factory() as session:
+            rows = service.list_run_statuses(session, user_id=user_id, run_ids=[run_id])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            set(rows[0]),
+            {"id", "keyword", "status", "total_iterations", "completed_iterations", "error_messages"},
+        )
+        self.assertEqual(rows[0]["status"], "running")
+        self.assertEqual(rows[0]["completed_iterations"], 1)
+
+    def test_status_poll_never_reads_the_raw_output_columns(self) -> None:
+        engine, service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._seed_run(session, user_id)
+
+        statements: list[str] = []
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _record(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+            statements.append(statement)
+
+        try:
+            with session_factory() as session:
+                service.list_run_statuses(session, user_id=user_id, run_ids=[run_id])
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+
+        emitted = " ".join(statements)
+        self.assertIn("Dashboard_AI_check_runs", emitted)
+        self.assertNotIn("Dashboard_AI_check_outputs", emitted)
+        for column in ("gpt_output", "gem_output", "grok_output"):
+            self.assertNotIn(column, emitted)
+
+    def test_status_poll_hides_other_users_runs_but_admins_see_them(self) -> None:
+        _, service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        other_user_id = uuid.uuid4()
+        with session_factory() as session:
+            own_run_id = self._seed_run(session, user_id, keyword="mine")
+            other_run_id = self._seed_run(session, other_user_id, keyword="theirs")
+
+        with session_factory() as session:
+            own = service.list_run_statuses(
+                session, user_id=user_id, run_ids=[own_run_id, other_run_id]
+            )
+            as_admin = service.list_run_statuses(
+                session, user_id=user_id, run_ids=[own_run_id, other_run_id], is_admin=True
+            )
+
+        self.assertEqual([row["id"] for row in own], [str(own_run_id)])
+        self.assertEqual({row["id"] for row in as_admin}, {str(own_run_id), str(other_run_id)})
+
+    def test_status_poll_with_no_ids_skips_the_database(self) -> None:
+        _, service, session_factory = self._fixture()
+        with session_factory() as session:
+            self.assertEqual(service.list_run_statuses(session, user_id=uuid.uuid4(), run_ids=[]), [])

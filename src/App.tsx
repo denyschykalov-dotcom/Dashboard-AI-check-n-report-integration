@@ -211,6 +211,23 @@ type RunDetail = {
   estimated_total_cost_usd: number | null;
 };
 
+// Progress-only shape returned by /api/runs/status. The active-run poller uses
+// this instead of RunDetail so ticking never pulls the raw LLM output columns
+// out of the database and down the wire.
+type RunStatusRecord = {
+  id: string;
+  keyword: string;
+  status: string;
+  total_iterations: number;
+  completed_iterations: number;
+  error_messages: string | null;
+};
+
+type RunStatusResponse = {
+  runs: RunStatusRecord[];
+  total_runs: number;
+};
+
 type ReportKind = "history" | "outputs";
 
 type ReportExportDialog = {
@@ -1564,7 +1581,7 @@ export default function App() {
   const [historyFilters, setHistoryFilters] = useState({ project: "", prompt: "", user: "", date_from: "", date_to: "", page: 1 });
   const [outputFilters, setOutputFilters] = useState({ project: "", prompt: "", page: 1 });
   const [selectedRunDetail, setSelectedRunDetail] = useState<RunDetail | null>(null);
-  const [activeRunDetails, setActiveRunDetails] = useState<RunDetail[]>([]);
+  const [activeRunStatuses, setActiveRunStatuses] = useState<RunStatusRecord[]>([]);
   const [activeRunIds, setActiveRunIds] = useState<string[]>([]);
   const [failedRuns, setFailedRuns] = useState<RunRecord[]>([]);
   const [overviewSummary, setOverviewSummary] = useState<OverviewSummary | null>(null);
@@ -1709,7 +1726,7 @@ export default function App() {
         setHistoryData({ items: [], page: 1, page_size: 10, total: 0 });
         setOutputData({ items: [], page: 1, page_size: 10, total: 0 });
         setSelectedRunDetail(null);
-        setActiveRunDetails([]);
+        setActiveRunStatuses([]);
         setActiveRunIds([]);
         setFailedRuns([]);
         setOverviewSummary(null);
@@ -1963,16 +1980,23 @@ export default function App() {
     let cancelled = false;
     const poll = async () => {
       try {
-        const detailResults = await Promise.all(
-          activeRunIds.map(async (runId) => apiRequest<RunDetail>(`/api/runs/${runId}`, { token: sessionToken })),
+        // One progress-only request for every tracked run. Never /api/runs/{id}
+        // here: that carries the full LLM output text this banner never shows.
+        const response = await apiRequest<RunStatusResponse>(
+          `/api/runs/status?ids=${encodeURIComponent(activeRunIds.join(","))}`,
+          { token: sessionToken },
         );
         if (cancelled) return;
 
-        const activeDetails = detailResults.filter((detail) => ["queued", "running", "stopped"].includes(detail.run.status));
-        const completedOrFailed = detailResults.filter((detail) => ["completed", "failed"].includes(detail.run.status));
-        const nextActiveIds = activeDetails.map((detail) => detail.run.id);
+        // Keep the tracked order stable so the id comparison below can't churn
+        // on a differently ordered response.
+        const byId = new Map(response.runs.map((run) => [run.id, run]));
+        const statuses = activeRunIds.map((runId) => byId.get(runId)).filter((run): run is RunStatusRecord => Boolean(run));
+        const stillActive = statuses.filter((run) => ["queued", "running", "stopped"].includes(run.status));
+        const completedOrFailed = statuses.filter((run) => ["completed", "failed"].includes(run.status));
+        const nextActiveIds = stillActive.map((run) => run.id);
 
-        setActiveRunDetails(activeDetails);
+        setActiveRunStatuses(stillActive);
         if (nextActiveIds.length !== activeRunIds.length || nextActiveIds.some((runId, index) => runId !== activeRunIds[index])) {
           setActiveRunIds(nextActiveIds);
         }
@@ -1980,8 +2004,8 @@ export default function App() {
         if (completedOrFailed.length) {
           await Promise.all([loadHistory(sessionToken), loadOutputs(sessionToken), loadOverview(sessionToken), loadFailedRuns(sessionToken)]);
           const failedMessages = completedOrFailed
-            .filter((detail) => detail.run.status === "failed" && detail.run.error_messages)
-            .map((detail) => detail.run.error_messages);
+            .filter((run) => run.status === "failed" && run.error_messages)
+            .map((run) => run.error_messages);
           if (failedMessages.length) {
             setStatusMessage(failedMessages.join(" | "));
           }
@@ -2033,7 +2057,7 @@ export default function App() {
       serviceRowsDirtyRef.current = false;
       setOutputData({ items: [], page: 1, page_size: 10, total: 0 });
       setSelectedRunDetail(null);
-      setActiveRunDetails([]);
+      setActiveRunStatuses([]);
       setActiveRunIds([]);
       setFailedRuns([]);
       await Promise.all([loadHistory(token), loadOverview(token)]);
@@ -2162,7 +2186,7 @@ export default function App() {
       const response = await apiRequest<ActiveRunsResponse>("/api/runs/active", { token });
       setActiveRunIds(response.run_ids);
       if (!response.run_ids.length) {
-        setActiveRunDetails([]);
+        setActiveRunStatuses([]);
       }
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Could not load active runs.");
@@ -2536,7 +2560,7 @@ export default function App() {
     setHistoryData({ items: [], page: 1, page_size: 10, total: 0 });
     setOutputData({ items: [], page: 1, page_size: 10, total: 0 });
     setSelectedRunDetail(null);
-    setActiveRunDetails([]);
+    setActiveRunStatuses([]);
     setActiveRunIds([]);
     setFailedRuns([]);
     setOverviewSummary(null);
@@ -3134,10 +3158,10 @@ export default function App() {
       domainMatches: rangeMonthly.reduce((sum, item) => sum + item.domain_matches, 0),
       spendUsd: rangeMonthly.reduce((sum, item) => sum + item.spend_usd, 0),
     };
-    const runningCount = activeRunDetails.filter((detail) => detail.run.status === "running").length;
-    const queuedCount = activeRunDetails.filter((detail) => detail.run.status === "queued").length;
-    const stoppedCount = activeRunDetails.filter((detail) => detail.run.status === "stopped").length;
-    const trackedRunCount = activeRunDetails.length;
+    const runningCount = activeRunStatuses.filter((run) => run.status === "running").length;
+    const queuedCount = activeRunStatuses.filter((run) => run.status === "queued").length;
+    const stoppedCount = activeRunStatuses.filter((run) => run.status === "stopped").length;
+    const trackedRunCount = activeRunStatuses.length;
     const activeRunCount = Math.max(overviewSummary?.stats.user_active_runs ?? 0, trackedRunCount);
     const adminScopeLabel = selectedOverviewUserLabel === "All users" ? "all users" : selectedOverviewUserLabel;
 
@@ -3174,7 +3198,7 @@ export default function App() {
       { label: "All Domain Matches", value: String(globalLastMonth?.domain_matches ?? 0), meta: `Last 30 days on ${selectedOverviewProjectLabel}` },
       { label: "All Users", value: String(globalLastMonth?.users ?? 0), meta: `Last 30 days on ${selectedOverviewProjectLabel}` },
     ];
-  }, [activeRunDetails, chartRangeMonths, overviewSummary, selectedOverviewProjectLabel, selectedOverviewUserLabel]);
+  }, [activeRunStatuses, chartRangeMonths, overviewSummary, selectedOverviewProjectLabel, selectedOverviewUserLabel]);
 
   const visibleMonthly = useMemo(() => {
     const monthly = overviewSummary?.monthly || [];
@@ -3675,17 +3699,17 @@ export default function App() {
 
                   <div className="service-meta">
                     <span>{isLoadingDraft ? "Loading draft..." : draftStatus}</span>
-                    <span>{activeRunDetails.length ? `${activeRunDetails.length} runs in progress` : "No active run."}</span>
+                    <span>{activeRunStatuses.length ? `${activeRunStatuses.length} runs in progress` : "No active run."}</span>
                   </div>
 
-                  {activeRunDetails.length ? (
+                  {activeRunStatuses.length ? (
                     <div className="active-run-list">
-                      {activeRunDetails.map((detail) => (
-                        <div key={detail.run.id} className="run-banner">
-                          <span className={`tag ${statusTone(detail.run.status)}`}>{detail.run.status}</span>
-                          <strong>{detail.run.keyword}</strong>
-                          <span>{detail.run.completed_iterations}/{detail.run.total_iterations} iterations complete</span>
-                          <button className="ghost-btn" type="button" onClick={() => void openRunDetail(detail.run.id)}>
+                      {activeRunStatuses.map((run) => (
+                        <div key={run.id} className="run-banner">
+                          <span className={`tag ${statusTone(run.status)}`}>{run.status}</span>
+                          <strong>{run.keyword}</strong>
+                          <span>{run.completed_iterations}/{run.total_iterations} iterations complete</span>
+                          <button className="ghost-btn" type="button" onClick={() => void openRunDetail(run.id)}>
                             Open Details
                           </button>
                         </div>
@@ -3914,7 +3938,7 @@ export default function App() {
                         className="ghost-btn"
                         type="button"
                         onClick={() => void handleStopRuns()}
-                        disabled={!activeRunDetails.some((detail) => ["queued", "running"].includes(detail.run.status)) || isStoppingRuns || isContinuingRuns || isRetryingFailedRuns}
+                        disabled={!activeRunStatuses.some((run) => ["queued", "running"].includes(run.status)) || isStoppingRuns || isContinuingRuns || isRetryingFailedRuns}
                       >
                         {isStoppingRuns ? "Stopping..." : "Stop all"}
                       </button>
@@ -3922,7 +3946,7 @@ export default function App() {
                         className="primary-btn"
                         type="button"
                         onClick={() => void handleContinueRuns()}
-                        disabled={!activeRunDetails.length || isStoppingRuns || isContinuingRuns || isRetryingFailedRuns}
+                        disabled={!activeRunStatuses.length || isStoppingRuns || isContinuingRuns || isRetryingFailedRuns}
                       >
                         {isContinuingRuns ? "Continuing..." : "Continue"}
                       </button>
@@ -3940,16 +3964,16 @@ export default function App() {
                     </div>
                   </div>
 
-                  {activeRunDetails.length ? (
+                  {activeRunStatuses.length ? (
                     <div className="active-run-list">
-                      {activeRunDetails.map((detail) => (
-                        <div key={detail.run.id} className="run-banner">
-                          <span className={`tag ${statusTone(detail.run.status)}`}>{detail.run.status}</span>
-                          <strong>{detail.run.keyword}</strong>
+                      {activeRunStatuses.map((run) => (
+                        <div key={run.id} className="run-banner">
+                          <span className={`tag ${statusTone(run.status)}`}>{run.status}</span>
+                          <strong>{run.keyword}</strong>
                           <span>
-                            {detail.run.completed_iterations}/{detail.run.total_iterations} iterations complete
+                            {run.completed_iterations}/{run.total_iterations} iterations complete
                           </span>
-                          <button className="ghost-btn" type="button" onClick={() => void openRunDetail(detail.run.id)}>
+                          <button className="ghost-btn" type="button" onClick={() => void openRunDetail(run.id)}>
                             Open Details
                           </button>
                         </div>

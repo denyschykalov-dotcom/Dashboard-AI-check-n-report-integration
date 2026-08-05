@@ -316,6 +316,52 @@ class RunService:
         )
         return [str(run_id) for run_id in active_run_ids]
 
+    def list_run_statuses(
+        self,
+        session: Session,
+        *,
+        user_id: uuid.UUID,
+        run_ids: list[uuid.UUID],
+        is_admin: bool = False,
+    ) -> list[dict[str, object]]:
+        """Progress-only view of the given runs, for the active-run poller.
+
+        Deliberately selects individual Run columns and never touches Output:
+        the poller ticks every few seconds per open tab, and get_run_detail()
+        would drag the multi-KB raw LLM responses out of the database on every
+        tick for a banner that only shows status and iteration progress.
+        Unknown or foreign run ids are simply absent from the result.
+        """
+        if not run_ids:
+            return []
+
+        statement = (
+            select(
+                Run.id,
+                Run.keyword,
+                Run.status,
+                Run.total_iterations,
+                Run.completed_iterations,
+                Run.error_messages,
+            )
+            .where(Run.id.in_(run_ids))
+            .order_by(Run.created_at.desc(), Run.id.desc())
+        )
+        if not is_admin:
+            statement = statement.where(Run.user_id == user_id)
+
+        return [
+            {
+                "id": str(row.id),
+                "keyword": row.keyword,
+                "status": row.status,
+                "total_iterations": row.total_iterations,
+                "completed_iterations": row.completed_iterations,
+                "error_messages": row.error_messages,
+            }
+            for row in session.execute(statement)
+        ]
+
     def list_failed_runs(self, session: Session, *, user_id: uuid.UUID) -> list[Run]:
         return list(
             session.execute(

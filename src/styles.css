@@ -2290,3 +2290,21 @@ th {
   background: rgba(127, 127, 127, 0.14);
   white-space: nowrap;
 }
+
+/* Fields that save on blur. Without a button there is nothing to press, so the
+   field itself carries the state: accent while the typed value differs from what
+   is stored, then a brief confirmation once it lands. */
+.auth-input.is-unsaved {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(193, 50, 207, 0.16);
+}
+
+.field-stack small.field-pending {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.field-stack small.field-saved {
+  color: #1f8f4e;
+  font-weight: 600;
+}
