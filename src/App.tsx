@@ -163,9 +163,8 @@ type RunOutputRecord = {
   user_id: string;
   run_id: string;
   iteration_number: number;
-  gpt_output: string | null;
-  gem_output: string | null;
-  grok_output: string | null;
+  // No gpt_output/gem_output/grok_output: the raw model responses are stored
+  // server-side but never sent to or rendered by the dashboard.
   gpt_domain_mention: boolean;
   gem_domain_mention: boolean;
   grok_domain_mention: boolean;
@@ -4517,29 +4516,19 @@ export default function App() {
 
               <section className="history-card detail-wide">
                 <div className="history-card-head">
-                  <strong>LLM Outputs</strong>
+                  <strong>Iteration Analysis</strong>
                   <span>{selectedRunDetail.outputs.length} iterations</span>
                 </div>
+                <p className="report-hint">
+                  Raw model responses stay in the database and are not loaded here — only what the analysis derived
+                  from them.
+                </p>
                 <div className="detail-output-list">
                   {selectedRunDetail.outputs.map((output) => (
                     <article key={output.id} className="detail-output-card">
                       <div className="detail-output-header">
                         <strong>Iteration {output.iteration_number}</strong>
                         <span>{summarizeMentions(output)}</span>
-                      </div>
-                      <div className="detail-output-grid">
-                        <div className="field-stack">
-                          <span>GPT Output</span>
-                          <div className="detail-output-body">{output.gpt_output || "-"}</div>
-                        </div>
-                        <div className="field-stack">
-                          <span>Gemini Output</span>
-                          <div className="detail-output-body">{output.gem_output || "-"}</div>
-                        </div>
-                        <div className="field-stack">
-                          <span>Grok Output</span>
-                          <div className="detail-output-body">{output.grok_output || "-"}</div>
-                        </div>
                       </div>
                       <div className="detail-metrics">
                         <span>Response count: {formatNumber(output.response_count)}</span>

@@ -13,6 +13,12 @@ os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 from backend.app.config import Settings, _runtime_database_url
 from backend.app.database_url import normalize_postgresql_url
 from backend.app.db import Base, build_engine
+from backend.app.domain import (
+    IterationLike,
+    select_sentiment_inputs,
+    select_sentiment_refs,
+    sentiment_refs_from_presence,
+)
 from backend.app.llm import IterationAnalysis, LLMUsage, TextGenerationResult
 from backend.app.models import Draft, Output, Profile, Run, RunResult
 from backend.app.prompt_builders import build_generation_request_prompt
@@ -894,6 +900,13 @@ class IntegrationFlowTests(unittest.TestCase):
             remaining_other_outputs = list(
                 session.execute(select(Output).where(Output.user_id == other_user_id)).scalars()
             )
+            # The response columns are deferred, so asserting on the stored text
+            # means asking for that column by name.
+            remaining_other_gpt_text = list(
+                session.execute(
+                    select(Output.gpt_output).where(Output.user_id == other_user_id)
+                ).scalars()
+            )
             remaining_results = list(session.execute(select(RunResult)).scalars())
 
         self.assertEqual(sorted(resumed_ids), sorted(active_before))
@@ -904,7 +917,7 @@ class IntegrationFlowTests(unittest.TestCase):
         self.assertTrue(all(run.error_messages is None for run in refreshed_runs.values()))
         self.assertEqual(remaining_user_outputs, [])
         self.assertEqual(len(remaining_other_outputs), 1)
-        self.assertEqual(remaining_other_outputs[0].gpt_output, "keep me")
+        self.assertEqual(remaining_other_gpt_text, ["keep me"])
         self.assertEqual(len(remaining_results), 1)
         self.assertEqual(remaining_results[0].user_id, other_user_id)
 
@@ -1321,3 +1334,216 @@ class RunStatusPollTests(unittest.TestCase):
         _, service, session_factory = self._fixture()
         with session_factory() as session:
             self.assertEqual(service.list_run_statuses(session, user_id=uuid.uuid4(), run_ids=[]), [])
+
+
+class RawOutputIsolationTests(unittest.TestCase):
+    """The stored model responses are write-only outside the sentiment prompt.
+
+    They are kept for the record, but nothing displays them and no query drags
+    them along: they are deferred at the mapper level with ``raiseload``, so an
+    accidental read fails loudly instead of quietly shipping multi-KB payloads.
+    """
+
+    def _fixture(self):
+        engine = build_engine("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(
+            bind=engine, autoflush=False, autocommit=False, expire_on_commit=False
+        )
+        service = RunService(
+            build_settings("sqlite+pysqlite:///:memory:"), session_factory, FakeLLMClient()
+        )
+        return engine, service, session_factory
+
+    def _seed(self, session, user_id, *, iterations=3):
+        run = Run(
+            user_id=user_id, keyword="k", domain="example.com", brand="b", prompt="p",
+            status="running", total_iterations=iterations, completed_iterations=iterations,
+        )
+        session.add(run)
+        session.flush()
+        for number in range(1, iterations + 1):
+            session.add(
+                Output(
+                    user_id=user_id, run_id=run.id, iteration_number=number,
+                    gpt_output=f"gpt-{number}-" + "x" * 4000,
+                    gem_output=f"gem-{number}-" + "y" * 4000,
+                    grok_output=f"grok-{number}-" + "z" * 4000,
+                    gpt_domain_mention=(number == 1), response_count=3.0,
+                    brand_list="b", citation_format="text",
+                )
+            )
+        session.commit()
+        return run.id
+
+    def test_writes_still_persist_the_full_text(self) -> None:
+        _, _, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._seed(session, user_id, iterations=1)
+        with session_factory() as session:
+            stored = session.execute(
+                select(Output.gpt_output, Output.gem_output, Output.grok_output)
+                .where(Output.run_id == run_id)
+            ).one()
+        self.assertTrue(stored.gpt_output.startswith("gpt-1-"))
+        self.assertEqual(len(stored.gpt_output), 4006)
+        self.assertEqual(len(stored.gem_output), 4006)
+        self.assertEqual(len(stored.grok_output), 4007)
+
+    def test_loading_output_rows_never_selects_the_text(self) -> None:
+        engine, _, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._seed(session, user_id)
+
+        statements: list[str] = []
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _record(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+            statements.append(statement)
+
+        try:
+            with session_factory() as session:
+                rows = list(
+                    session.execute(select(Output).where(Output.run_id == run_id)).scalars()
+                )
+                self.assertEqual(len(rows), 3)
+                # Metrics are still there; the text is not loaded, and asking for
+                # it on a loaded row is an error rather than a hidden query.
+                self.assertEqual(rows[0].response_count, 3.0)
+                with self.assertRaises(Exception):
+                    _ = rows[0].gpt_output
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+
+        emitted = " ".join(statements)
+        for column in ("gpt_output", "gem_output", "grok_output"):
+            self.assertNotIn(column, emitted)
+
+    def test_run_detail_query_carries_no_text(self) -> None:
+        engine, service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._seed(session, user_id)
+
+        statements: list[str] = []
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _record(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+            statements.append(statement)
+
+        try:
+            with session_factory() as session:
+                _, outputs, _ = service.get_run_detail(session, user_id=user_id, run_id=run_id)
+                self.assertEqual(len(outputs), 3)
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+
+        emitted = " ".join(statements)
+        for column in ("gpt_output", "gem_output", "grok_output"):
+            self.assertNotIn(column, emitted)
+
+    def test_finalize_reads_only_the_selected_responses(self) -> None:
+        engine, service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._seed(session, user_id)
+
+        statements: list[str] = []
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _record(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+            statements.append(statement)
+
+        snapshot = RunSnapshot(
+            id=run_id, user_id=user_id, keyword="k", domain="example.com",
+            brand="b", prompt="p", project=None,
+        )
+        try:
+            service._finalize_run(snapshot)
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+
+        # 9 responses exist (3 iterations x 3 providers); the prompt takes 4, so
+        # at most 4 statements may mention a text column, one column each.
+        text_reads = [
+            statement
+            for statement in statements
+            if any(column in statement for column in ("gpt_output", "gem_output", "grok_output"))
+        ]
+        # length() presence checks name the columns but transfer no text.
+        presence_checks = [statement for statement in text_reads if "length" in statement.lower()]
+        value_reads = [statement for statement in text_reads if statement not in presence_checks]
+        self.assertEqual(len(presence_checks), 1)
+        self.assertLessEqual(len(value_reads), 4)
+        for statement in value_reads:
+            named = sum(
+                1 for column in ("gpt_output", "gem_output", "grok_output") if column in statement
+            )
+            self.assertEqual(named, 1)
+
+        # The sentiment call still received real text, so the result is intact.
+        with session_factory() as session:
+            result = session.execute(select(RunResult).where(RunResult.run_id == run_id)).scalar_one()
+        self.assertTrue(result.sentiment_analysis)
+
+    def test_finalize_sentiment_inputs_match_the_in_memory_selection(self) -> None:
+        """The metadata-driven selection picks exactly what the old path picked."""
+        _, service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._seed(session, user_id)
+
+        with session_factory() as session:
+            rows = list(
+                session.execute(
+                    select(
+                        Output.iteration_number,
+                        Output.gpt_output, Output.gem_output, Output.grok_output,
+                        Output.gpt_domain_mention, Output.gem_domain_mention, Output.grok_domain_mention,
+                        Output.gpt_brand_mention, Output.gem_brand_mention, Output.grok_brand_mention,
+                        Output.response_count, Output.brand_list, Output.citation_format,
+                    ).where(Output.run_id == run_id).order_by(Output.iteration_number.asc())
+                )
+            )
+        in_memory = select_sentiment_inputs(
+            [
+                IterationLike(
+                    iteration_number=row.iteration_number,
+                    gpt_output=row.gpt_output, gem_output=row.gem_output, grok_output=row.grok_output,
+                    gpt_domain_mention=row.gpt_domain_mention, gem_domain_mention=row.gem_domain_mention,
+                    grok_domain_mention=row.grok_domain_mention, gpt_brand_mention=row.gpt_brand_mention,
+                    gem_brand_mention=row.gem_brand_mention, grok_brand_mention=row.grok_brand_mention,
+                    response_count=row.response_count, brand_list=row.brand_list,
+                    citation_format=row.citation_format,
+                )
+                for row in rows
+            ],
+            limit=4,
+        )
+
+        refs = select_sentiment_refs(
+            sentiment_refs_from_presence(
+                [
+                    (
+                        row.iteration_number,
+                        {"gpt": True, "gemini": True, "grok": True},
+                        {
+                            "gpt": bool(row.gpt_domain_mention or row.gpt_brand_mention),
+                            "gemini": bool(row.gem_domain_mention or row.gem_brand_mention),
+                            "grok": bool(row.grok_domain_mention or row.grok_brand_mention),
+                        },
+                    )
+                    for row in rows
+                ]
+            ),
+            limit=4,
+        )
+        with session_factory() as session:
+            from_db = service._load_sentiment_texts(session, run_id=run_id, refs=refs)
+
+        self.assertEqual(
+            [(item.provider, item.iteration_number, item.text) for item in from_db],
+            [(item.provider, item.iteration_number, item.text) for item in in_memory],
+        )

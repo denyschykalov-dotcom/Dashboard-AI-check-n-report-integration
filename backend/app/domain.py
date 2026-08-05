@@ -32,6 +32,21 @@ class SentimentInput:
     mentioned: bool
 
 
+@dataclass(frozen=True)
+class SentimentRef:
+    """A candidate response identified by provider and iteration, without its text.
+
+    Picking which responses go into the final sentiment prompt only needs to know
+    that a response exists and whether it mentioned the brand or domain — never
+    what it says. Selecting on refs lets the caller fetch the raw text for the
+    handful that were actually chosen instead of loading every response.
+    """
+
+    provider: str
+    iteration_number: int
+    mentioned: bool
+
+
 def split_brand_variations(raw_brand: typing.Optional[str]) -> list[str]:
     seen: set[str] = set()
     variations: list[str] = []
@@ -169,37 +184,13 @@ def aggregate_outputs(outputs: list[IterationLike]) -> dict[str, object]:
     }
 
 
-def select_sentiment_inputs(outputs: list[IterationLike], limit: int = 4) -> list[SentimentInput]:
-    candidates: list[SentimentInput] = []
-    for item in sorted(outputs, key=lambda row: row.iteration_number):
-        if item.gpt_output:
-            candidates.append(
-                SentimentInput(
-                    provider="gpt",
-                    iteration_number=item.iteration_number,
-                    text=item.gpt_output,
-                    mentioned=bool(item.gpt_domain_mention or item.gpt_brand_mention),
-                )
-            )
-        if item.gem_output:
-            candidates.append(
-                SentimentInput(
-                    provider="gemini",
-                    iteration_number=item.iteration_number,
-                    text=item.gem_output,
-                    mentioned=bool(item.gem_domain_mention or item.gem_brand_mention),
-                )
-            )
-        if item.grok_output:
-            candidates.append(
-                SentimentInput(
-                    provider="grok",
-                    iteration_number=item.iteration_number,
-                    text=item.grok_output,
-                    mentioned=bool(item.grok_domain_mention or item.grok_brand_mention),
-                )
-            )
+def select_sentiment_refs(candidates: list[SentimentRef], limit: int = 4) -> list[SentimentRef]:
+    """Pick which responses feed the final sentiment prompt.
 
+    ``candidates`` must already be in iteration-then-provider order, holding only
+    the responses that actually have text. Mentions come first, then the rest, and
+    every provider present keeps at least one slot.
+    """
     mentioned = [candidate for candidate in candidates if candidate.mentioned]
     others = [candidate for candidate in candidates if not candidate.mentioned]
     ordered_candidates = mentioned + others
@@ -246,6 +237,65 @@ def select_sentiment_inputs(outputs: list[IterationLike], limit: int = 4) -> lis
         selected[replace_index] = replacement
 
     return selected[:limit]
+
+
+_PROVIDER_FIELDS: tuple[tuple[str, str, str, str], ...] = (
+    ("gpt", "gpt_output", "gpt_domain_mention", "gpt_brand_mention"),
+    ("gemini", "gem_output", "gem_domain_mention", "gem_brand_mention"),
+    ("grok", "grok_output", "grok_domain_mention", "grok_brand_mention"),
+)
+
+
+def sentiment_refs_from_presence(
+    rows: list[tuple[int, dict[str, bool], dict[str, bool]]],
+) -> list[SentimentRef]:
+    """Build the candidate list from per-provider text presence and mention flags.
+
+    ``rows`` is ``(iteration_number, {provider: has_text}, {provider: mentioned})``
+    — everything the selection needs, and nothing that requires reading a response.
+    """
+    candidates: list[SentimentRef] = []
+    for iteration_number, has_text, mentioned in sorted(rows, key=lambda row: row[0]):
+        for provider, _, _, _ in _PROVIDER_FIELDS:
+            if has_text.get(provider):
+                candidates.append(
+                    SentimentRef(
+                        provider=provider,
+                        iteration_number=iteration_number,
+                        mentioned=bool(mentioned.get(provider)),
+                    )
+                )
+    return candidates
+
+
+def select_sentiment_inputs(outputs: list[IterationLike], limit: int = 4) -> list[SentimentInput]:
+    """Select sentiment inputs from iterations that already carry their text.
+
+    Kept for callers holding full iterations in memory; it shares its selection
+    with :func:`select_sentiment_refs`, so both paths choose identically.
+    """
+    texts: dict[tuple[str, int], str] = {}
+    rows: list[tuple[int, dict[str, bool], dict[str, bool]]] = []
+    for item in outputs:
+        has_text: dict[str, bool] = {}
+        mentioned: dict[str, bool] = {}
+        for provider, text_field, domain_field, brand_field in _PROVIDER_FIELDS:
+            text = getattr(item, text_field)
+            has_text[provider] = bool(text)
+            mentioned[provider] = bool(getattr(item, domain_field) or getattr(item, brand_field))
+            if text:
+                texts[(provider, item.iteration_number)] = text
+        rows.append((item.iteration_number, has_text, mentioned))
+
+    return [
+        SentimentInput(
+            provider=ref.provider,
+            iteration_number=ref.iteration_number,
+            text=texts[(ref.provider, ref.iteration_number)],
+            mentioned=ref.mentioned,
+        )
+        for ref in select_sentiment_refs(sentiment_refs_from_presence(rows), limit=limit)
+    ]
 
 
 def drop_one_gpt_for_sentiment_retry(inputs: list[SentimentInput]) -> list[SentimentInput]:

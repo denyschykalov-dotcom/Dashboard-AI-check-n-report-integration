@@ -374,9 +374,9 @@ def get_run_detail(
             "user_id": item.user_id,
             "run_id": item.run_id,
             "iteration_number": item.iteration_number,
-            "gpt_output": item.gpt_output,
-            "gem_output": item.gem_output,
-            "grok_output": item.grok_output,
+            # The raw gpt/gem/grok responses are intentionally absent: they are
+            # stored for the record, not served. Nothing in the UI renders them,
+            # and shipping them here was the bulk of this endpoint's payload.
             "gpt_domain_mention": item.gpt_domain_mention,
             "gem_domain_mention": item.gem_domain_mention,
             "grok_domain_mention": item.grok_domain_mention,

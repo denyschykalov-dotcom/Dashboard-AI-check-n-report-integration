@@ -15,10 +15,13 @@ from sqlalchemy.orm import Load, Session, sessionmaker
 from backend.app.config import Settings
 from backend.app.domain import (
     IterationLike,
+    SentimentInput,
+    SentimentRef,
     aggregate_outputs,
     detect_mentions,
     drop_one_gpt_for_sentiment_retry,
-    select_sentiment_inputs,
+    select_sentiment_refs,
+    sentiment_refs_from_presence,
 )
 from backend.app.llm import LLMClient, TextGenerationResult
 from backend.app.models import Draft, Output, Profile, Run, RunResult
@@ -294,6 +297,8 @@ class RunService:
         if run is None:
             raise LookupError("Run not found.")
 
+        # Carries per-iteration mentions, metrics and costs. The raw responses are
+        # deferred on the model, so this select leaves them in the database.
         outputs = list(
             session.execute(
                 select(Output).where(Output.run_id == run_id)
@@ -764,44 +769,138 @@ class RunService:
         logger.info("run_iteration_completed run_id=%s iteration=%s", run.id, iteration_number)
         self._raise_if_run_stopped(run.id)
 
+    _SENTIMENT_TEXT_COLUMNS = {
+        "gpt": Output.gpt_output,
+        "gemini": Output.gem_output,
+        "grok": Output.grok_output,
+    }
+
+    def _load_sentiment_texts(
+        self,
+        session: Session,
+        *,
+        run_id: uuid.UUID,
+        refs: list[SentimentRef],
+    ) -> list[SentimentInput]:
+        """Fetch the raw text for the selected responses only — nothing else.
+
+        This is the single place in the application that reads a stored model
+        response back out of the database, and it pulls at most one column per
+        selected ref (four by default) rather than every response in the run.
+        A ref whose text has since been cleaned up is skipped.
+        """
+        inputs: list[SentimentInput] = []
+        for ref in refs:
+            column = self._SENTIMENT_TEXT_COLUMNS.get(ref.provider)
+            if column is None:
+                continue
+            text = session.execute(
+                select(column).where(
+                    and_(Output.run_id == run_id, Output.iteration_number == ref.iteration_number)
+                )
+            ).scalar_one_or_none()
+            if not text:
+                logger.warning(
+                    "sentiment_text_missing run_id=%s iteration=%s provider=%s",
+                    run_id,
+                    ref.iteration_number,
+                    ref.provider,
+                )
+                continue
+            inputs.append(
+                SentimentInput(
+                    provider=ref.provider,
+                    iteration_number=ref.iteration_number,
+                    text=text,
+                    mentioned=ref.mentioned,
+                )
+            )
+        return inputs
+
     def _finalize_run(self, run: RunSnapshot) -> None:
         logger.info("run_finalize_started run_id=%s", run.id)
+        # Aggregation needs the mention flags and metrics, never the responses
+        # themselves, so this reads named columns plus a server-side presence
+        # check per provider. `length(...) > 0` matches the old truthiness test
+        # on the text without the text ever leaving the database.
         with self.session_factory() as session:
-            outputs = list(
+            rows = list(
                 session.execute(
-                    select(Output).where(Output.run_id == run.id).order_by(Output.iteration_number.asc(), Output.created_at.asc())
-                ).scalars()
+                    select(
+                        Output.iteration_number,
+                        Output.gpt_domain_mention,
+                        Output.gem_domain_mention,
+                        Output.grok_domain_mention,
+                        Output.gpt_brand_mention,
+                        Output.gem_brand_mention,
+                        Output.grok_brand_mention,
+                        Output.response_count,
+                        Output.brand_list,
+                        Output.citation_format,
+                        (func.coalesce(func.length(Output.gpt_output), 0) > 0).label("has_gpt"),
+                        (func.coalesce(func.length(Output.gem_output), 0) > 0).label("has_gem"),
+                        (func.coalesce(func.length(Output.grok_output), 0) > 0).label("has_grok"),
+                    )
+                    .where(Output.run_id == run.id)
+                    .order_by(Output.iteration_number.asc(), Output.created_at.asc())
+                )
             )
 
-        if len(outputs) < self.settings.total_iterations:
+        if len(rows) < self.settings.total_iterations:
             logger.error(
                 "run_finalize_missing_outputs run_id=%s output_count=%s expected=%s",
                 run.id,
-                len(outputs),
+                len(rows),
                 self.settings.total_iterations,
             )
             raise RuntimeError("Not all iteration rows are available for aggregation.")
 
+        # aggregate_outputs() reads only the metric fields; the text stays None
+        # here because it is deliberately not loaded.
         output_views = [
             IterationLike(
-                iteration_number=item.iteration_number,
-                gpt_output=item.gpt_output,
-                gem_output=item.gem_output,
-                grok_output=item.grok_output,
-                gpt_domain_mention=item.gpt_domain_mention,
-                gem_domain_mention=item.gem_domain_mention,
-                grok_domain_mention=item.grok_domain_mention,
-                gpt_brand_mention=item.gpt_brand_mention,
-                gem_brand_mention=item.gem_brand_mention,
-                grok_brand_mention=item.grok_brand_mention,
-                response_count=item.response_count,
-                brand_list=item.brand_list,
-                citation_format=item.citation_format,
+                iteration_number=row.iteration_number,
+                gpt_output=None,
+                gem_output=None,
+                grok_output=None,
+                gpt_domain_mention=row.gpt_domain_mention,
+                gem_domain_mention=row.gem_domain_mention,
+                grok_domain_mention=row.grok_domain_mention,
+                gpt_brand_mention=row.gpt_brand_mention,
+                gem_brand_mention=row.gem_brand_mention,
+                grok_brand_mention=row.grok_brand_mention,
+                response_count=row.response_count,
+                brand_list=row.brand_list,
+                citation_format=row.citation_format,
             )
-            for item in outputs
+            for row in rows
         ]
         aggregate_payload = aggregate_outputs(output_views)
-        sentiment_inputs = select_sentiment_inputs(output_views, limit=4)
+
+        candidate_refs = sentiment_refs_from_presence(
+            [
+                (
+                    row.iteration_number,
+                    {"gpt": bool(row.has_gpt), "gemini": bool(row.has_gem), "grok": bool(row.has_grok)},
+                    {
+                        "gpt": bool(row.gpt_domain_mention or row.gpt_brand_mention),
+                        "gemini": bool(row.gem_domain_mention or row.gem_brand_mention),
+                        "grok": bool(row.grok_domain_mention or row.grok_brand_mention),
+                    },
+                )
+                for row in rows
+            ]
+        )
+        selected_refs = select_sentiment_refs(candidate_refs, limit=4)
+        # Only now, and only for the handful the prompt will actually carry.
+        with self.session_factory() as session:
+            sentiment_inputs = self._load_sentiment_texts(session, run_id=run.id, refs=selected_refs)
+        logger.info(
+            "run_finalize_sentiment_inputs run_id=%s candidates=%s loaded=%s",
+            run.id,
+            len(candidate_refs),
+            len(sentiment_inputs),
+        )
 
         try:
             sentiment_result = self.llm_client.call_with_retry(

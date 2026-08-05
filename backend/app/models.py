@@ -80,9 +80,23 @@ class Output(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     run_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     iteration_number: Mapped[int] = mapped_column(Integer, nullable=False)
-    gpt_output: Mapped[typing.Optional[str]] = mapped_column(Text)
-    gem_output: Mapped[typing.Optional[str]] = mapped_column(Text)
-    grok_output: Mapped[typing.Optional[str]] = mapped_column(Text)
+    # The raw model responses are the whole reason this table is large: multi-KB
+    # each, three per iteration. They are kept for the record but are write-only
+    # in practice, so they are deferred at the mapper level — no `select(Output)`
+    # anywhere pulls them, and `deferred_raiseload` turns an accidental
+    # ``row.gpt_output`` into an error instead of a silent extra query. The one
+    # legitimate reader (building the final sentiment prompt) asks for the
+    # specific columns it needs with a column-level select. Writing them is
+    # unaffected.
+    gpt_output: Mapped[typing.Optional[str]] = mapped_column(
+        Text, deferred=True, deferred_raiseload=True
+    )
+    gem_output: Mapped[typing.Optional[str]] = mapped_column(
+        Text, deferred=True, deferred_raiseload=True
+    )
+    grok_output: Mapped[typing.Optional[str]] = mapped_column(
+        Text, deferred=True, deferred_raiseload=True
+    )
     gpt_domain_mention: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
     gem_domain_mention: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
     grok_domain_mention: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="false")
