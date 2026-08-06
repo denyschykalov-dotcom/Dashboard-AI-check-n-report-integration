@@ -8,8 +8,15 @@ commonly run a 4-stage workflow, e.g. todo -> doing -> done -> complete, and
 only the named "Done"/"Todo" stages belong in the report):
 
 * ``work_completed`` (DONE) — tasks whose status is literally "Done" (not
-  "Complete"/closed-archived) and whose completion date falls in the report
+  "Complete"/closed-archived) and whose *tracked time* places them in the report
   month. A task closed in an earlier month is not re-listed every period.
+
+  The period test deliberately uses tracked time rather than the completion
+  date: client lists are worked through a month and then marked Done in a batch
+  early the *next* month, so ``date_done`` puts July's work in the August
+  report and leaves July's report empty. A task is anchored to the month of its
+  **last** time entry; tasks with no tracked time at all (e.g. ones predating
+  time tracking) fall back to ``date_done`` so nothing silently disappears.
 * ``planned_works`` (TODO) — tasks whose status is literally "Todo" (not
   "Doing" or any other in-progress/backlog status); these are the plans
   carried into the next period.
@@ -179,9 +186,64 @@ def _load_tasks(context: ResolveContext) -> dict[str, object]:
         recognised_todo=_TODO_STATUS_NAME,
     )
 
-    result = {"list_name": matched["name"], "list_id": matched["id"], "tasks": tasks}
+    # The token travels with the cached result so the tracked-time lookups below
+    # don't have to re-read (and re-decrypt) it per task.
+    result = {"list_name": matched["name"], "list_id": matched["id"], "tasks": tasks, "token": token}
     context.cache[cache_key] = result
     return result
+
+
+def _tracked_time(context: ResolveContext, token: str, task_id: str) -> dict[str, object]:
+    """Per-user tracked time for one task, fetched at most once per generate call.
+
+    Costs one API call per candidate task, so it is only ever asked for tasks
+    already known to be in the DONE stage (a handful per list), never the whole
+    list.
+    """
+    cache_key = ("clickup_task_time", task_id)
+    if cache_key in context.cache:
+        return context.cache[cache_key]
+
+    # A failed lookup is deliberately *not* swallowed into "no time tracked":
+    # that would silently re-anchor the task on date_done, which is the exact
+    # mis-scoping this rule exists to fix, in a client-facing report. Better to
+    # fail the block loudly than to publish a wrong month.
+    blocks: list[dict] = clickup_client.fetch_task_time(token, task_id) if task_id else []
+
+    intervals: list[tuple[int, int]] = []
+    by_user: dict[str, int] = {}
+    for block in blocks:
+        username = (block.get("user") or {}).get("username") or ""
+        for interval in block.get("intervals") or []:
+            try:
+                start = int(interval["start"])
+                duration = int(interval["time"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            intervals.append((start, duration))
+            if username:
+                by_user[username] = by_user.get(username, 0) + duration
+    intervals.sort()
+
+    result = {
+        "intervals": intervals,
+        "total_ms": sum(duration for _, duration in intervals),
+        "by_user": by_user,
+    }
+    context.cache[cache_key] = result
+    return result
+
+
+def _tracked_month(intervals: list[tuple[int, int]]) -> typing.Optional[tuple[int, int]]:
+    """The (year, month) of the task's last time entry, or None if untracked."""
+    if not intervals:
+        return None
+    last_start = intervals[-1][0]  # sorted by start, so this is the latest entry
+    try:
+        moment = datetime.fromtimestamp(last_start / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return (moment.year, moment.month)
 
 
 def _completed_in_period(summary: dict[str, object], period_months: set[tuple[int, int]]) -> bool:
@@ -209,15 +271,39 @@ def _status_name(task: dict) -> str:
     return re.sub(r"[\s_\-]+", "", raw)
 
 
-def _done_tasks(tasks: list[dict], period_months: set[tuple[int, int]]) -> list[dict[str, object]]:
-    """Tasks in the "Done" status, completed during the reporting period."""
+def _done_tasks(
+    context: ResolveContext,
+    token: str,
+    tasks: list[dict],
+    period_months: set[tuple[int, int]],
+) -> list[dict[str, object]]:
+    """Tasks in the "Done" status whose tracked time falls in the reporting period.
+
+    Anchored to the month of the task's last time entry (see module docstring),
+    falling back to its completion date when no time was ever tracked.
+    """
     out = []
     for task in tasks:
         if _status_name(task) != _DONE_STATUS_NAME:
             continue
         summary = _task_summary(task)
-        if _completed_in_period(summary, period_months):
-            out.append(summary)
+        tracked = _tracked_time(context, token, str(task.get("id") or ""))
+        intervals = typing.cast(list, tracked["intervals"])
+        anchor = _tracked_month(intervals)
+        if anchor is None:
+            if not _completed_in_period(summary, period_months):
+                continue
+            summary["period_basis"] = "date_done"
+        else:
+            if anchor not in period_months:
+                continue
+            summary["period_basis"] = "tracked_time"
+            summary["tracked_month"] = f"{anchor[0]}-{anchor[1]:02d}"
+        # Intervals are the authoritative total (they sum to the task's own
+        # time_spent); keep time_spent as the fallback for the untracked case.
+        summary["time_spent_ms"] = int(tracked["total_ms"]) or int(task.get("time_spent") or 0)
+        summary["time_by_user"] = tracked["by_user"]
+        out.append(summary)
     return out
 
 
@@ -235,10 +321,18 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
     tasks = data["tasks"]
     if block.key == "work_completed":
         months = _period_months(context)
-        items = _done_tasks(tasks, months)
-        # A "Done" task still drops out if it was completed outside the report
-        # month, so count both to tell "wrong status" apart from "wrong month".
+        try:
+            items = _done_tasks(context, str(data["token"]), tasks, months)
+        except ClickUpAccessError as error:
+            # Tracked time decides which month each task belongs to, so a failed
+            # read (rate limit, revoked token) can't be shrugged off — without it
+            # the block would silently report the wrong month's work.
+            return BlockResult.unavailable(f"Could not read ClickUp tracked time: {error}")
+        # A "Done" task still drops out if its tracked time sits outside the
+        # report month, so count both to tell "wrong status" apart from "wrong
+        # month", and report how many were placed by tracked time vs date_done.
         done_any_month = sum(1 for task in tasks if _status_name(task) == _DONE_STATUS_NAME)
+        total_ms = sum(int(item.get("time_spent_ms") or 0) for item in items)
         log_event(
             logger,
             "clickup_block",
@@ -247,11 +341,17 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
             tasks_total=len(tasks),
             status_done=done_any_month,
             in_period=len(items),
+            by_tracked_time=sum(1 for i in items if i.get("period_basis") == "tracked_time"),
+            by_date_done=sum(1 for i in items if i.get("period_basis") == "date_done"),
+            tracked_hours=round(total_ms / 3600000, 2),
             period_months=",".join(f"{y}-{m:02d}" for y, m in sorted(months)),
         )
-        return BlockResult.ok(
-            {"list_name": data["list_name"], "count": len(items), "tasks": items}
-        )
+        return BlockResult.ok({
+            "list_name": data["list_name"],
+            "count": len(items),
+            "total_time_spent_ms": total_ms,
+            "tasks": items,
+        })
     if block.key == "planned_works":
         items = _todo_tasks(tasks)
         log_event(

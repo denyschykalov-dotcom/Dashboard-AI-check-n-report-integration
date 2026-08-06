@@ -70,6 +70,12 @@ export type ReportCustomization = {
   accent: string | null;
   charts: Record<string, string>;
   panels: Record<string, ReportPanelConfig>;
+  /**
+   * ClickUp task ids struck off in the preview, keyed by block key
+   * ("work_completed" / "planned_works"). Held as an exclusion list rather than
+   * edited into the block's data so a removal stays undoable.
+   */
+  excludedTasks: Record<string, string[]>;
 };
 
 export type GenerateReportResponse = {

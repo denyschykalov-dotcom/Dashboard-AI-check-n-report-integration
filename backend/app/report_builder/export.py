@@ -211,6 +211,24 @@ def _task_id(url: str) -> str:
     return url.rstrip("/").split("/")[-1] if url else ""
 
 
+def _duration(ms: typing.Any) -> str:
+    """ClickUp tracked time as a client reads it: "3h 30m", "45m", "" for none.
+
+    Minutes are rounded, so anything under 30 seconds shows as empty rather than
+    a misleading "0m".
+    """
+    try:
+        total_minutes = round(int(ms) / 60000)
+    except (TypeError, ValueError):
+        return ""
+    if total_minutes <= 0:
+        return ""
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        return f"{hours}h {minutes}m"
+    return f"{hours}h" if hours else f"{minutes}m"
+
+
 def _build_data(
     *,
     period_label: str,
@@ -481,17 +499,39 @@ def _build_data(
         data["ahrefsLosers"] = mover(d.get("losers", []))
 
     # -- ClickUp work (b12/b13) --
-    # Each row is [summary, task, task_id]: the Summary column leads with a brief
-    # description (the task's ClickUp description, falling back to its title), the
-    # Task column keeps the title, and the Category column has been dropped.
+    # Each row is [summary, task, task_id, time]: the Summary column leads with a
+    # brief description (the task's ClickUp description, falling back to its
+    # title), the Task column keeps the title, Time is the tracked time logged
+    # against the task, and the Category column has been dropped.
+    # Tasks the specialist struck off in the preview. Dropping them here rather
+    # than in the template is what makes the client HTML, the PDF and the
+    # Markdown export agree on one list.
+    #
+    # The *editable* preview is the exception: it keeps every task in the payload
+    # and lets the template decide what to draw, because a removal has to stay
+    # undoable — filtering them out server-side would leave "Restore all" with
+    # nothing to put back.
+    excluded_tasks = _normalize_excluded_tasks((customization or {}).get("excludedTasks"))
+
+    def _kept(source_key, rows):
+        if editable:
+            return list(rows)
+        dropped = set(excluded_tasks.get(source_key) or ())
+        return [t for t in rows if _task_id(t.get("url", "")) not in dropped]
+
     def tasks(source_key):
         d = ok.get(source_key) or {}
         out = []
-        for t in d.get("tasks", []):
+        for t in _kept(source_key, d.get("tasks", [])):
             name = t.get("name", "")
             description = (t.get("description") or "").strip()
             summary = description or name
-            out.append([summary, name, _task_id(t.get("url", ""))])
+            # The raw ms trails the formatted string so the preview can re-total
+            # the column when a row is struck off, without re-parsing "3h 30m".
+            out.append([
+                summary, name, _task_id(t.get("url", "")), _duration(t.get("time_spent_ms")),
+                int(t.get("time_spent_ms") or 0),
+            ])
         return out
     # Planned works (the ClickUp "Todo" stage) renders as a numbered plan rather
     # than a table, so it carries the fields that make each item readable on its
@@ -499,7 +539,7 @@ def _build_data(
     def planned_items(source_key):
         d = ok.get(source_key) or {}
         out = []
-        for t in d.get("tasks", []):
+        for t in _kept(source_key, d.get("tasks", [])):
             out.append({
                 "name": t.get("name", ""),
                 "description": (t.get("description") or "").strip(),
@@ -510,6 +550,15 @@ def _build_data(
         return out
     if "work_completed" in ok:
         data["workDone"] = tasks("work_completed")
+        # Summed over the tasks that survive exclusion, so striking one off takes
+        # its hours out of the total too. The HTML re-totals from the rows it
+        # draws; this value is what the Markdown export prints.
+        dropped_done = set(excluded_tasks.get("work_completed") or ())
+        data["workDoneTotal"] = _duration(sum(
+            int(t.get("time_spent_ms") or 0)
+            for t in (ok["work_completed"] or {}).get("tasks", [])
+            if _task_id(t.get("url", "")) not in dropped_done
+        ))
     if "planned_works" in ok:
         planned = ok["planned_works"] or {}
         if planned.get("mode") == "manual":
@@ -635,8 +684,9 @@ def _normalize_customization(raw: typing.Optional[dict]) -> dict:
     """Sanitize the stored customization blob into the exact shape the template
     reads, filling defaults so the template never has to guard for missing keys.
 
-    Shape: ``accent`` (report-wide), ``charts`` (per chart-slot variant), and
-    ``panels`` (per-block text config: size + heading/body weight)."""
+    Shape: ``accent`` (report-wide), ``charts`` (per chart-slot variant),
+    ``panels`` (per-block text config: size + heading/body weight), and
+    ``excludedTasks`` (ClickUp task ids the specialist struck off a block)."""
     raw = raw if isinstance(raw, dict) else {}
 
     accent = raw.get("accent")
@@ -652,7 +702,27 @@ def _normalize_customization(raw: typing.Optional[dict]) -> dict:
         "accent": accent,
         "charts": charts,
         "panels": panels,
+        "excludedTasks": _normalize_excluded_tasks(raw.get("excludedTasks")),
     }
+
+
+def _normalize_excluded_tasks(raw: typing.Any) -> dict[str, list[str]]:
+    """``{block_key: [clickup_task_id, ...]}`` of tasks struck off in the preview.
+
+    Stored as an exclusion list rather than by editing the block's data so the
+    removal is reversible and a regenerate doesn't silently resurrect it — the
+    task stays in the block payload and is simply not rendered.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for block_key, ids in raw.items():
+        if not isinstance(ids, (list, tuple)):
+            continue
+        cleaned = [str(i).strip() for i in ids if str(i or "").strip()]
+        if cleaned:
+            out[str(block_key)] = list(dict.fromkeys(cleaned))  # dedupe, keep order
+    return out
 
 
 def _block_to_dict(block: ReportBlock) -> dict:
@@ -1087,8 +1157,10 @@ def _md_se_ranking(data: dict) -> str:
 
 
 def _md_work_done(data: dict) -> str:
-    rows = [[r[0], r[1], r[2]] for r in (data.get("workDone") or [])]
-    return _md_table(["Summary", "Task", "ID"], rows)
+    rows = [[r[0], r[1], r[2], r[3] if len(r) > 3 else ""] for r in (data.get("workDone") or [])]
+    table = _md_table(["Summary", "Task", "ID", "Time"], rows)
+    total = (data.get("workDoneTotal") or "").strip()
+    return f"{table}\n\n**Total time tracked: {total}**" if total else table
 
 
 def _md_planned_work(data: dict) -> str:

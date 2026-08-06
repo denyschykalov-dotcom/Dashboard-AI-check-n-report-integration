@@ -193,6 +193,19 @@ tbody tr:hover{background:#FBFCFE}
 .planlist .pi-desc .hl{color:var(--ink);font-weight:700;background:#FFF0F7;
   border-radius:4px;padding:0 3px}
 .planlist .pi-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+/* Preview-only: strike a wrong ClickUp task off a section. Rendered only when
+   DATA.editable, so the client version never carries these controls. */
+.tr-rm{border:1px solid var(--line);background:var(--bg2);color:var(--muted);
+  width:22px;height:22px;border-radius:6px;line-height:1;cursor:pointer;padding:0;
+  font-size:14px;display:inline-flex;align-items:center;justify-content:center}
+.tr-rm:hover{border-color:var(--accent);color:var(--accent);background:#FFF0F7}
+th.tr-rm-c,td.tr-rm-c{width:30px;text-align:center;padding-left:0;padding-right:6px}
+.planlist>li.has-rm{grid-template-columns:34px 1fr auto}
+.planlist>li>.tr-rm{grid-column:3;align-self:start}
+.tr-rm-note{margin-top:10px;color:var(--muted);display:flex;gap:8px;align-items:center}
+.tr-restore{border:1px solid var(--line);background:var(--bg2);color:var(--ink);
+  border-radius:7px;padding:3px 9px;font-size:11.5px;font-weight:600;cursor:pointer}
+.tr-restore:hover{border-color:var(--accent);color:var(--accent)}
 .planlist .chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;
   background:#fff;border:1px solid var(--line);border-radius:999px;padding:2px 9px;color:var(--muted)}
 .planlist .chip.due{background:#FEF7E0;border-color:#F3E3B0;color:#7a5b00;font-weight:600}
@@ -898,12 +911,80 @@ function renderSER(){
     DATA.seranking.keywords.map(k=>`<tr><td>${esc(k[0])}</td><td class="r">${fnum(k[1])}</td><td class="r">${k[2]}</td>
      <td class="r">${posChange(k[2],k[3])}</td></tr>`).join('')}</tbody></table>`;
 }
-function taskTable(id, rows){
-  // rows: [summary, task, task_id] — Summary leads with a brief description.
-  document.getElementById(id).innerHTML=
-    `<table><thead><tr><th>Summary</th><th>Task</th><th>ID</th></tr></thead><tbody>${
-    rows.map(r=>`<tr><td>${esc(r[0])}</td><td class="muted">${esc(r[1])}</td>
-     <td><a href="https://app.clickup.com/t/${r[2]}" target="_blank" class="small">${r[2]}</a></td></tr>`).join('')}</tbody></table>`;
+// --- removed ClickUp tasks ---------------------------------------------------
+// A ClickUp list can surface a task that doesn't belong in the client's report.
+// Regenerating to drop one row would re-fetch every source, so the specialist
+// strikes it off here instead. Removals are held as an exclusion list posted up
+// to the dashboard, which saves them with the report; the block's own data is
+// left intact so a removal stays undoable.
+//
+// In the editable preview every task is present in DATA and this list decides
+// what renders. The client-facing build has them filtered out server-side, so
+// the list is empty there and none of this code runs.
+const REMOVED_TASKS = (function(){
+  const raw=(DATA.customization&&DATA.customization.excludedTasks)||{}, out={};
+  Object.keys(raw).forEach(k=>{ out[k]=(raw[k]||[]).slice(); });
+  return out;
+})();
+function removedIds(blockKey){ return REMOVED_TASKS[blockKey]||(REMOVED_TASKS[blockKey]=[]); }
+function isRemoved(blockKey, taskId){ return removedIds(blockKey).indexOf(String(taskId))>=0; }
+function removeTask(blockKey, taskId){
+  const list=removedIds(blockKey);
+  if(list.indexOf(String(taskId))<0) list.push(String(taskId));
+  postToParent('taskRemove', blockKey, list.slice());
+  renderOne(SEC_BY_KEY[blockKey]);
+}
+function restoreTasks(blockKey){
+  REMOVED_TASKS[blockKey]=[];
+  postToParent('taskRemove', blockKey, []);
+  renderOne(SEC_BY_KEY[blockKey]);
+}
+/** "N tasks removed — Restore all", appended under a section that has any. */
+function removedNote(blockKey){
+  const n=removedIds(blockKey).length;
+  if(!DATA.editable || !n) return '';
+  return `<div class="tr-rm-note small">${n} task${n>1?'s':''} removed from this section. `+
+    `<button class="tr-restore" data-block="${esc(blockKey)}">Restore all</button></div>`;
+}
+/** Delegated once per section host: rows are re-rendered on every change. */
+function wireTaskControls(host, blockKey){
+  if(!DATA.editable || !host || host.dataset.rmWired==='1') return;
+  host.dataset.rmWired='1';
+  host.addEventListener('click', event=>{
+    const rm=event.target.closest('button.tr-rm');
+    if(rm){ removeTask(blockKey, rm.dataset.task||''); return; }
+    if(event.target.closest('button.tr-restore')) restoreTasks(blockKey);
+  });
+}
+// Tracked time as the report prints it — mirrors the backend's _duration().
+function trackedDuration(ms){
+  const mins=Math.round((Number(ms)||0)/60000);
+  if(mins<=0) return '';
+  const h=Math.floor(mins/60), m=mins%60;
+  return h&&m ? (h+'h '+m+'m') : (h?h+'h':m+'m');
+}
+function taskTable(id, rows, blockKey){
+  // rows: [summary, task, task_id, time, time_ms] — Summary leads with a brief
+  // description; Time is the tracked time logged against the task in ClickUp.
+  const rm = !!(DATA.editable && blockKey);
+  const shown = rm ? rows.filter(r=>!isRemoved(blockKey, r[2])) : rows;
+  // Totalled over what is actually listed, so striking a task off takes its
+  // hours out of the total in the same click.
+  const total = trackedDuration(shown.reduce((sum,r)=>sum+(Number(r[4])||0), 0));
+  const foot = total
+    ? `<div class="small" style="margin-top:10px;text-align:right">Total time tracked: <b>${esc(total)}</b></div>`
+    : '';
+  const host = document.getElementById(id);
+  host.innerHTML=
+    `<table><thead><tr><th>Summary</th><th>Task</th><th>ID</th><th>Time</th>${
+      rm?'<th class="tr-rm-c"></th>':''}</tr></thead><tbody>${
+    shown.map(r=>`<tr><td>${esc(r[0])}</td><td class="muted">${esc(r[1])}</td>
+     <td><a href="https://app.clickup.com/t/${r[2]}" target="_blank" class="small">${r[2]}</a></td>
+     <td class="small">${esc(r[3]||'')}</td>${
+       rm?`<td class="tr-rm-c"><button class="tr-rm" data-task="${esc(r[2])}"
+            title="Remove this task from the report">&times;</button></td>`:''}</tr>`).join('')
+    }</tbody></table>`+foot+removedNote(blockKey);
+  wireTaskControls(host, blockKey);
 }
 // A due date as the client reads it ("12 Aug 2026"); anything unparseable is
 // shown verbatim rather than dropped.
@@ -928,22 +1009,36 @@ function planItem(t, i){
   // The description repeats the title on tasks that have none — don't print it twice.
   const desc=(t.description||'').trim();
   const showDesc = desc && desc!==String(name).trim();
-  return '<li><div class="pi-body">'+
+  const rm = DATA.editable && t.taskId
+    ? '<button class="tr-rm" data-task="'+esc(t.taskId)+
+      '" title="Remove this task from the report">&times;</button>'
+    : '';
+  return '<li'+(rm?' class="has-rm"':'')+'><div class="pi-body">'+
     '<div class="pi-name">'+esc(name)+'</div>'+
     (showDesc?'<div class="pi-desc">'+planHighlight(desc)+'</div>':'')+
     (chips.length?'<div class="pi-meta">'+chips.join('')+'</div>':'')+
-    '</div></li>';
+    '</div>'+rm+'</li>';
 }
 function renderPlanned(){
   const manual=DATA.workPlannedManual||'';
   const mEl=document.getElementById('planManual'), tEl=document.getElementById('planTable');
   if(manual){ mEl.innerHTML=manual; mEl.style.display='block'; tEl.style.display='none'; return; }
   mEl.style.display='none'; tEl.style.display='';
-  const items=DATA.workPlanned||[];
-  if(!items.length){ tEl.innerHTML='<div class="muted small">No planned tasks for the next period.</div>'; return; }
+  // Planned works is a ClickUp section too, so a wrong task can be struck off
+  // here the same way it can in Work completed.
+  const all=DATA.workPlanned||[];
+  const items=DATA.editable ? all.filter(t=>!isRemoved('planned_works', t.taskId)) : all;
+  if(!items.length){
+    tEl.innerHTML='<div class="muted small">No planned tasks for the next period.</div>'+
+      removedNote('planned_works');
+    wireTaskControls(tEl, 'planned_works');
+    return;
+  }
   tEl.innerHTML='<div class="plan-count"><b>'+items.length+'</b> '+
     (items.length===1?'task':'tasks')+' planned for the next period</div>'+
-    '<ol class="planlist">'+items.map(planItem).join('')+'</ol>';
+    '<ol class="planlist">'+items.map(planItem).join('')+'</ol>'+
+    removedNote('planned_works');
+  wireTaskControls(tEl, 'planned_works');
 }
 function renderSummary(){
   const el=document.getElementById('summary');
@@ -966,7 +1061,7 @@ function paintLabels(){
   document.querySelectorAll('.cur-lbl').forEach(e=>e.textContent=LBL[P.cur]);
   document.querySelectorAll('.cmp-lbl').forEach(e=>e.textContent=LBL[cmp()]);
 }
-const SECRENDER={b1:renderIntro,b2:renderIndustry,b3:renderAhrefs,b4:renderAhMovers,b5:renderGA4,b6:renderLanding,b7:renderEcom,b8:renderAI,b9:renderGSC,b10:renderGscTables,b11:renderSER,b12:()=>taskTable('doneTable',DATA.workDone||[]),b13:renderPlanned,b14:renderSummary,b15:renderAIVisibility};
+const SECRENDER={b1:renderIntro,b2:renderIndustry,b3:renderAhrefs,b4:renderAhMovers,b5:renderGA4,b6:renderLanding,b7:renderEcom,b8:renderAI,b9:renderGSC,b10:renderGscTables,b11:renderSER,b12:()=>taskTable('doneTable',DATA.workDone||[],'work_completed'),b13:renderPlanned,b14:renderSummary,b15:renderAIVisibility};
 function blockState(secId){ return (DATA.report&&DATA.report.blocks&&DATA.report.blocks[secId])||null; }
 function applyReportChrome(){
   if(!DATA.report) return;

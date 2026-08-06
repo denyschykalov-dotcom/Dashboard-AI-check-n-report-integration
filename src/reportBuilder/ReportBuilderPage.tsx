@@ -61,6 +61,7 @@ const DEFAULT_CUSTOMIZATION: ReportCustomization = {
   accent: "#E6007A",
   charts: {},
   panels: {},
+  excludedTasks: {},
 };
 
 // The block whose comment *is* the executive summary at the top of the report.
@@ -803,14 +804,26 @@ export default function ReportBuilderPage({ token }: Props) {
         | { source?: string; kind?: string; key?: string | null; value?: unknown }
         | null;
       if (!data || data.source !== "report-preview") return;
-      // The preview only reports notes and chart-type choices now: the accent is
-      // fixed pink and per-panel text sizing was removed, so neither can change.
+      // The preview reports notes, chart-type choices and struck-off ClickUp
+      // tasks: the accent is fixed pink and per-panel text sizing was removed,
+      // so neither of those can change.
       if (data.kind === "note" && typeof data.key === "string") {
         const key = data.key;
         setComments((current) => ({ ...current, [key]: String(data.value ?? "") }));
       } else if (data.kind === "chart" && typeof data.key === "string") {
         const key = data.key;
         setCustomization((current) => ({ ...current, charts: { ...current.charts, [key]: String(data.value ?? "") } }));
+      } else if (data.kind === "taskRemove" && typeof data.key === "string") {
+        // The preview sends the block's whole exclusion list, so this also
+        // covers "Restore all" (which sends an empty one).
+        const key = data.key;
+        const ids = Array.isArray(data.value) ? data.value.map(String) : [];
+        setCustomization((current) => {
+          const next = { ...current.excludedTasks };
+          if (ids.length) next[key] = ids;
+          else delete next[key];
+          return { ...current, excludedTasks: next };
+        });
       }
     }
     window.addEventListener("message", onMessage);
@@ -1005,7 +1018,12 @@ export default function ReportBuilderPage({ token }: Props) {
       });
       setComments(loadedComments);
       setSelectedKeys(loadedKeys);
-      const reopenedCustomization = detail.customization ?? DEFAULT_CUSTOMIZATION;
+      // Merged over the defaults: reports saved before a customization field
+      // existed have no key for it, and the preview must not read undefined.
+      const reopenedCustomization = {
+        ...DEFAULT_CUSTOMIZATION,
+        ...(detail.customization ?? {}),
+      };
       setCustomization(reopenedCustomization);
       setEditingReportId(detail.id);
       // A reopened report keeps the comments and summary it was saved with —
