@@ -161,6 +161,78 @@ class ResolverTests(unittest.TestCase):
         result = ai_visibility.resolve(get_block("ai_visibility_all_1mo"), self._context(client))
         self.assertEqual(result.status, "unavailable")
 
+    def test_ai_visibility_blocks_share_one_query_per_generate(self) -> None:
+        """All eight AI-visibility blocks read the project once, not once each.
+
+        They differ only by window and model, both of which are filters over the
+        same rows. Re-querying per block pulled the project's whole history eight
+        times over — the report builder's largest source of Supabase egress.
+        """
+        client = _client(self.session)
+        _seed_ai_run(self.session, project="Acme Co", created_at=utcnow(), gpt_domain=True)
+        context = self._context(client)  # one context = one generate call
+        ai_blocks = [block for block in BLOCK_CATALOG if block.source == "ai_visibility"]
+
+        executed = []
+        real_execute = context.session.execute
+
+        def _counting_execute(statement, *args, **kwargs):
+            executed.append(statement)
+            return real_execute(statement, *args, **kwargs)
+
+        with patch.object(context.session, "execute", side_effect=_counting_execute):
+            results = [ai_visibility.resolve(block, context) for block in ai_blocks]
+
+        self.assertEqual(len(ai_blocks), 8)
+        self.assertEqual(len(executed), 1)
+        self.assertTrue(all(result.status == "ok" for result in results))
+
+    def test_ai_visibility_query_selects_no_wide_text_columns(self) -> None:
+        """The aggregation needs six booleans, a timestamp and a user id.
+
+        Selecting whole ``RunResult``/``Run`` entities also dragged each run's
+        prompt and each result's brand list, citation format and sentiment JSON
+        across the wire — kilobytes a row, for nothing.
+        """
+        client = _client(self.session)
+        _seed_ai_run(self.session, project="Acme Co", created_at=utcnow(), gpt_domain=True)
+        context = self._context(client)
+
+        executed = []
+        real_execute = context.session.execute
+
+        def _capturing_execute(statement, *args, **kwargs):
+            executed.append(statement)
+            return real_execute(statement, *args, **kwargs)
+
+        with patch.object(context.session, "execute", side_effect=_capturing_execute):
+            ai_visibility.resolve(get_block("ai_visibility_all_1mo"), context)
+
+        selected = {column.name for column in executed[0].selected_columns}
+        self.assertEqual(
+            selected,
+            {
+                "created_at",
+                "user_id",
+                "gpt_domain_mention",
+                "gem_domain_mention",
+                "grok_domain_mention",
+                "gpt_brand_mention",
+                "gem_brand_mention",
+                "grok_brand_mention",
+            },
+        )
+
+    def test_ai_visibility_window_cut_happens_in_sql(self) -> None:
+        """Rows outside the widest window must never leave the database."""
+        client = _client(self.session)
+        _seed_ai_run(self.session, project="Acme Co", created_at=utcnow(), gpt_domain=True)
+        _seed_ai_run(self.session, project="Acme Co", created_at=utcnow() - timedelta(days=400))
+        context = self._context(client)
+
+        rows = ai_visibility._load_rows(context, "acme co")
+        self.assertEqual(len(rows), 1)  # the 400-day-old run was filtered server-side
+
 
 def _ga4_sheet_fixture() -> dict[str, list[list[str]]]:
     return {

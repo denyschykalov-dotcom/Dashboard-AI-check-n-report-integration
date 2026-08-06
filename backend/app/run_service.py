@@ -8,6 +8,8 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+# ``datetime.time`` above already owns the name, so the clock comes in directly.
+from time import monotonic
 
 from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.orm import Load, Session, sessionmaker
@@ -30,6 +32,30 @@ from backend.app.utils import compact_error_message, utcnow
 
 
 logger = logging.getLogger("rankberry.run_service")
+
+
+# --- Active-run poll cache ----------------------------------------------------
+# The progress banner polls /api/runs/status every few seconds, and every open
+# tab polls independently — the same handful of rows, re-read from Supabase per
+# tab per tick. A short TTL collapses those concurrent reads into one without
+# making a single tab's ticks any staler than they already are: the window is
+# shorter than the poll interval, so one tab never serves itself a cached tick.
+STATUS_POLL_CACHE_TTL_SECONDS = 3.0
+# Bound on distinct (requester, run-id-set) keys held. Keys are transient — a
+# set changes as runs finish — so stale ones are pruned rather than left to grow.
+_STATUS_POLL_CACHE_MAX_ENTRIES = 512
+_STATUS_POLL_CACHE: dict[tuple, tuple[float, list[dict[str, object]]]] = {}
+
+
+def _prune_status_poll_cache(now: float) -> None:
+    for key, (expires_at, _) in list(_STATUS_POLL_CACHE.items()):
+        if expires_at <= now:
+            _STATUS_POLL_CACHE.pop(key, None)
+
+
+def clear_status_poll_cache() -> None:
+    """Drop every cached poll response (tests, and any state reset)."""
+    _STATUS_POLL_CACHE.clear()
 
 
 @dataclass(frozen=True)
@@ -336,9 +362,20 @@ class RunService:
         would drag the multi-KB raw LLM responses out of the database on every
         tick for a banner that only shows status and iteration progress.
         Unknown or foreign run ids are simply absent from the result.
+
+        Results are held for ``STATUS_POLL_CACHE_TTL_SECONDS`` so that several
+        tabs polling the same runs cost one database read instead of one each.
+        The key includes the requester, so no tab can be served another user's
+        rows out of the cache.
         """
         if not run_ids:
             return []
+
+        now = monotonic()
+        cache_key = (user_id, is_admin, tuple(sorted(str(run_id) for run_id in run_ids)))
+        cached = _STATUS_POLL_CACHE.get(cache_key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
 
         statement = (
             select(
@@ -355,7 +392,7 @@ class RunService:
         if not is_admin:
             statement = statement.where(Run.user_id == user_id)
 
-        return [
+        statuses = [
             {
                 "id": str(row.id),
                 "keyword": row.keyword,
@@ -366,6 +403,11 @@ class RunService:
             }
             for row in session.execute(statement)
         ]
+
+        if len(_STATUS_POLL_CACHE) >= _STATUS_POLL_CACHE_MAX_ENTRIES:
+            _prune_status_poll_cache(now)
+        _STATUS_POLL_CACHE[cache_key] = (now + STATUS_POLL_CACHE_TTL_SECONDS, statuses)
+        return statuses
 
     def list_failed_runs(self, session: Session, *, user_id: uuid.UUID) -> list[Run]:
         return list(

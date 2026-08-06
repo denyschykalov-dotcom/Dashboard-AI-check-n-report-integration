@@ -1,8 +1,10 @@
 import os
+import time
 import unittest
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import delete, event, select
 from sqlalchemy.orm import sessionmaker
@@ -22,7 +24,12 @@ from backend.app.domain import (
 from backend.app.llm import IterationAnalysis, LLMUsage, TextGenerationResult
 from backend.app.models import Draft, Output, Profile, Run, RunResult
 from backend.app.prompt_builders import build_generation_request_prompt
-from backend.app.run_service import RunService, RunSnapshot
+from backend.app.run_service import (
+    STATUS_POLL_CACHE_TTL_SECONDS,
+    RunService,
+    RunSnapshot,
+    clear_status_poll_cache,
+)
 from backend.app.utils import utcnow
 
 
@@ -1243,6 +1250,9 @@ class RunStatusPollTests(unittest.TestCase):
     status tag and an iteration counter was the bulk of the database egress.
     """
 
+    def setUp(self) -> None:
+        clear_status_poll_cache()  # the poll cache is module-level state
+
     def _fixture(self):
         engine = build_engine("sqlite+pysqlite:///:memory:")
         Base.metadata.create_all(engine)
@@ -1334,6 +1344,70 @@ class RunStatusPollTests(unittest.TestCase):
         _, service, session_factory = self._fixture()
         with session_factory() as session:
             self.assertEqual(service.list_run_statuses(session, user_id=uuid.uuid4(), run_ids=[]), [])
+
+    def test_repeat_polls_for_the_same_runs_hit_the_cache(self) -> None:
+        """Concurrent tabs poll the same ids; they should cost one read, not one each."""
+        engine, service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._seed_run(session, user_id)
+
+        selects: list[str] = []
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _record(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+            if statement.lstrip().upper().startswith("SELECT"):
+                selects.append(statement)
+
+        try:
+            with session_factory() as session:
+                first = service.list_run_statuses(session, user_id=user_id, run_ids=[run_id])
+                second = service.list_run_statuses(session, user_id=user_id, run_ids=[run_id])
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+
+        self.assertEqual(len(selects), 1)
+        self.assertEqual(first, second)
+
+    def test_poll_cache_does_not_leak_across_users(self) -> None:
+        """A cache keyed loosely would serve one specialist another's runs."""
+        _, service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        other_user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._seed_run(session, user_id, keyword="mine")
+
+        with session_factory() as session:
+            mine = service.list_run_statuses(session, user_id=user_id, run_ids=[run_id])
+            theirs = service.list_run_statuses(session, user_id=other_user_id, run_ids=[run_id])
+
+        self.assertEqual([row["id"] for row in mine], [str(run_id)])
+        self.assertEqual(theirs, [])  # not their run, and not served from my entry
+
+    def test_poll_cache_expires_so_progress_keeps_moving(self) -> None:
+        """The banner must still advance; the cache only collapses concurrent reads."""
+        _, service, session_factory = self._fixture()
+        user_id = uuid.uuid4()
+        with session_factory() as session:
+            run_id = self._seed_run(session, user_id)
+
+        with session_factory() as session:
+            before = service.list_run_statuses(session, user_id=user_id, run_ids=[run_id])
+            session.get(Run, run_id).status = "completed"
+            session.commit()
+            # Still inside the TTL: the previous tick stands.
+            self.assertEqual(
+                service.list_run_statuses(session, user_id=user_id, run_ids=[run_id])[0]["status"],
+                "running",
+            )
+            with patch(
+                "backend.app.run_service.monotonic",
+                return_value=time.monotonic() + STATUS_POLL_CACHE_TTL_SECONDS + 1,
+            ):
+                after = service.list_run_statuses(session, user_id=user_id, run_ids=[run_id])
+
+        self.assertEqual(before[0]["status"], "running")
+        self.assertEqual(after[0]["status"], "completed")
 
 
 class RawOutputIsolationTests(unittest.TestCase):

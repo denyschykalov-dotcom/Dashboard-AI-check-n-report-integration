@@ -2016,14 +2016,45 @@ export default function App() {
       }
     };
 
-    void poll();
-    const intervalId = window.setInterval(() => {
+    // Only tick while someone is actually looking. A backgrounded tab still runs
+    // its intervals, so a dashboard left open behind other windows kept reading
+    // the runs table every 4s for a banner nobody could see. On the way back the
+    // banner catches up immediately rather than waiting out the interval.
+    let intervalId = 0;
+
+    const stop = () => {
+      if (intervalId) {
+        window.clearInterval(intervalId);
+        intervalId = 0;
+      }
+    };
+
+    const start = () => {
+      if (intervalId) return;
+      intervalId = window.setInterval(() => {
+        void poll();
+      }, 4000);
+    };
+
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        stop();
+        return;
+      }
       void poll();
-    }, 4000);
+      start();
+    };
+
+    if (!document.hidden) {
+      void poll();
+      start();
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
+      stop();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [activeRunIds, sessionToken]);
 
