@@ -14,9 +14,30 @@ Journal). Prefer primary sources; check dates so you report the correct month.
 Write a brief summary of the events, expert observations, updates and
 volatility noticed that month.
 
+Format — the report renders each line of this section as its own card, with the
+label as a coloured chip and the first sentence as the headline, so the shape
+below is what makes it readable:
+
+- Write 2 to 4 items, one per line, nothing else. No blank lines, no bullets,
+  no numbering.
+- Each line is: LABEL — Headline sentence. One or two sentences of detail.
+- LABEL is SHORT and UPPERCASE, at most three words, followed by an em dash and
+  a space. Use one of these where it fits, and coin a similar one where none
+  does: CORE UPDATE, SPAM UPDATE, AI SEARCH, VOLATILITY, TECHNICAL,
+  ANNOUNCEMENT, NO UPDATE.
+- The headline is one short sentence ending in a full stop — it is the line the
+  client actually reads. The detail follows in the same line.
+
+Example of the shape (not the content — never reuse these events):
+CORE UPDATE — Google confirmed a core update on 12 June. The rollout took 14
+days and hit thin category pages hardest.
+VOLATILITY — Third-party trackers logged elevated ranking movement mid-month.
+Semrush Sensor and Mozcast both peaked around 10 June; Google did not confirm a
+separate update.
+
 Rules:
-- Under 150 words. This is a scene-setter, not a survey — one or two short
-  paragraphs, plain text, no markdown, no headings, no bullet lists, no links.
+- Under 150 words in total. This is a scene-setter, not a survey — plain text,
+  no markdown, no headings, no links.
 - Report only what you actually found. If Google confirmed no update that month,
   say so plainly — an unremarkable month is a legitimate and useful finding.
 - Distinguish clearly between what Google confirmed and what third-party

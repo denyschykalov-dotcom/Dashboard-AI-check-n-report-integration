@@ -215,6 +215,14 @@ UI_STRINGS: tuple[str, ...] = (
     "Task",
     "Due",
     "No planned tasks for the next period.",
+    # The count line that opens each of the two work sections; the number itself
+    # sits in its own element, so only the trailing phrase is a translatable key.
+    "task planned for the next period",
+    "tasks planned for the next period",
+    "task completed this period",
+    "tasks completed this period",
+    "Total time tracked:",
+    "No tasks were completed in this period.",
     # -- search industry -------------------------------------------------------
     "Search industry",
     # -- months (short, then long) --------------------------------------------

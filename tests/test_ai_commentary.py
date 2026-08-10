@@ -151,6 +151,16 @@ class SearchIndustryTextTests(unittest.TestCase):
         self.assertLessEqual(len(out.split()), 45)
         self.assertNotIn("tail", out)
 
+    def test_trim_to_words_drops_whole_lines(self):
+        """One item per line is the format the report parses into cards.
+
+        Trimming must not reflow the lines into one paragraph, or four items
+        collapse into a single card.
+        """
+        lines = [f"LABEL{i} — " + " ".join(["word"] * 20) + "." for i in range(4)]
+        out = ai_commentary._trim_to_words("\n".join(lines), 50)
+        self.assertEqual(out.splitlines(), lines[:2])
+
     def test_trim_to_words_falls_back_to_an_ellipsis(self):
         out = ai_commentary._trim_to_words(" ".join(["word"] * 200), 150)
         self.assertEqual(len(out.split()), 150)

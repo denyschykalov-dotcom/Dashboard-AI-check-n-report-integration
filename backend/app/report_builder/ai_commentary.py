@@ -131,10 +131,14 @@ _DEFAULT_SEARCH_INDUSTRY_PROMPT = (
     "section of a monthly client report. Use web search — the reporting month is "
     "recent, so do not rely on memory. Summarise that month's confirmed Google "
     "algorithm updates, ranking volatility reported by SERP trackers, official "
-    "announcements and notable expert observations. Under 150 words, plain text, "
-    "no markdown. Clearly separate what Google confirmed from what third parties "
-    "merely observed, and say so plainly if no update was confirmed. Never invent "
-    "events; if you find nothing reliable, return an empty string."
+    "announcements and notable expert observations. Write 2-4 items, one per "
+    "line, each as 'LABEL — Headline sentence. One or two sentences of detail.' "
+    "LABEL is SHORT and UPPERCASE, at most three words (CORE UPDATE, SPAM "
+    "UPDATE, AI SEARCH, VOLATILITY, TECHNICAL, ANNOUNCEMENT, NO UPDATE). Under "
+    "150 words total, plain text, no markdown, no bullets. Clearly separate what "
+    "Google confirmed from what third parties merely observed, and say so "
+    "plainly if no update was confirmed. Never invent events; if you find "
+    "nothing reliable, return an empty string."
 )
 
 _DEFAULT_SUMMARY_PROMPT = (
@@ -351,12 +355,31 @@ def _trim_to_length(text: str, max_chars: int) -> str:
 
 
 def _trim_to_words(text: str, max_words: int) -> str:
-    """Enforce a word ceiling on a sentence boundary where one is close enough."""
+    """Enforce a word ceiling on a sentence boundary where one is close enough.
+
+    Line structure is load-bearing here: the search-industry section is written
+    one item per line and the report renders each line as its own card, so the
+    ceiling is spent line by line and a line that does not fit is dropped whole
+    rather than reflowed into the one before it.
+    """
     cleaned = (text or "").strip()
-    words = cleaned.split()
-    if len(words) <= max_words:
+    if len(cleaned.split()) <= max_words:
         return cleaned
-    window = " ".join(words[:max_words])
+
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if len(lines) > 1:
+        kept: list[str] = []
+        spent = 0
+        for line in lines:
+            words = line.split()
+            if spent + len(words) > max_words:
+                break
+            kept.append(" ".join(words))
+            spent += len(words)
+        if kept:
+            return "\n".join(kept)
+
+    window = " ".join(cleaned.split()[:max_words])
     cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
     if cut > len(window) * 0.6:
         return window[: cut + 1].strip()
