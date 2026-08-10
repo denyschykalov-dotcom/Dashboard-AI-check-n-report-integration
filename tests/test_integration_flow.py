@@ -160,6 +160,7 @@ def build_settings(database_url: str) -> Settings:
         request_timeout_seconds=5.0,
         raw_output_retention_days=30,
         queue_poll_seconds=0.1,
+        queue_poll_max_seconds=0.1,
         worker_concurrency=1,
         enforce_one_active_run_per_user=True,
         total_iterations=3,

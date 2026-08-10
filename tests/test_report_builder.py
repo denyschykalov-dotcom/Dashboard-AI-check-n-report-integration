@@ -1,4 +1,5 @@
 import os
+import time
 import unittest
 import uuid
 from contextlib import contextmanager
@@ -2161,6 +2162,98 @@ class CustomizationTests(unittest.TestCase):
         updated = self.session.get(report_service.Report, report.id)
         summary = report_service.serialize_report_summary(updated)
         self.assertEqual(summary["customization"]["accent"], "#222222")
+
+
+class ReportCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session = _make_session()
+        # Module-global cache: a report saved by one test must never be visible
+        # to the next, and these tests assert on hit/miss counts.
+        report_service.invalidate_report_cache()
+        self.addCleanup(report_service.invalidate_report_cache)
+
+    def _saved_report(self, *, comment="first"):
+        client = _client(self.session)
+        return report_service.save_report(
+            self.session,
+            client_id=client.id,
+            period_label="Jun 2026",
+            blocks=[{"block_type_key": "intro_header", "data": {"rows": [1, 2, 3]}, "comment": comment}],
+            generated_by=uuid.uuid4(),
+        )
+
+    def test_second_read_does_not_touch_the_database(self) -> None:
+        report = self._saved_report()
+
+        first_report, first_blocks = report_service.get_report(self.session, report.id)
+        with patch.object(self.session, "execute") as execute, patch.object(self.session, "get") as get:
+            second_report, second_blocks = report_service.get_report(self.session, report.id)
+
+        execute.assert_not_called()
+        get.assert_not_called()
+        self.assertEqual(second_report.id, first_report.id)
+        self.assertEqual(second_report.period_label, "Jun 2026")
+        self.assertEqual(len(second_blocks), len(first_blocks))
+        self.assertEqual(second_blocks[0].data_json, first_blocks[0].data_json)
+        self.assertEqual(second_blocks[0].comment, "first")
+
+    def test_cached_blocks_serialize_identically(self) -> None:
+        report = self._saved_report()
+
+        fresh = report_service.serialize_report_detail(*report_service.get_report(self.session, report.id))
+        cached = report_service.serialize_report_detail(*report_service.get_report(self.session, report.id))
+
+        self.assertEqual(fresh, cached)
+        self.assertEqual(cached["blocks"][0]["data"], {"rows": [1, 2, 3]})
+
+    def test_update_invalidates_so_the_next_read_sees_the_new_blocks(self) -> None:
+        report = self._saved_report(comment="first")
+        report_service.get_report(self.session, report.id)  # populate
+
+        report_service.update_report(
+            self.session,
+            report_id=report.id,
+            period_label="Jul 2026",
+            blocks=[{"block_type_key": "intro_header", "data": {"rows": [9]}, "comment": "second"}],
+            generated_by=uuid.uuid4(),
+        )
+
+        _, blocks = report_service.get_report(self.session, report.id)
+        self.assertEqual(blocks[0].comment, "second")
+        self.assertEqual(blocks[0].data_json, '{"rows": [9]}')
+
+    def test_delete_invalidates_so_the_next_read_raises(self) -> None:
+        report = self._saved_report()
+        report_service.get_report(self.session, report.id)  # populate
+
+        report_service.delete_report(self.session, report.id)
+
+        with self.assertRaises(LookupError):
+            report_service.get_report(self.session, report.id)
+
+    def test_expired_entry_is_re_read(self) -> None:
+        report = self._saved_report()
+        report_service.get_report(self.session, report.id)
+
+        # Jump past the TTL rather than sleeping through it.
+        with patch(
+            "backend.app.report_builder.service.time.monotonic",
+            return_value=time.monotonic() + report_service.REPORT_CACHE_TTL_SECONDS + 1,
+        ):
+            with patch.object(self.session, "get", side_effect=self.session.get) as get:
+                report_service.get_report(self.session, report.id)
+
+        get.assert_called_once()
+
+    def test_cache_never_grows_past_its_ceiling(self) -> None:
+        for _ in range(report_service._REPORT_CACHE_MAX_ENTRIES + 5):
+            saved = self._saved_report()
+            report_service.get_report(self.session, saved.id)
+
+        self.assertLessEqual(
+            len(report_service._REPORT_CACHE),
+            report_service._REPORT_CACHE_MAX_ENTRIES,
+        )
 
 
 if __name__ == "__main__":

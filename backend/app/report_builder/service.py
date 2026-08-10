@@ -435,6 +435,7 @@ def update_report(
     _replace_blocks(session, report.id, blocks)
     session.commit()
     session.refresh(report)
+    invalidate_report_cache(report.id)
     logger.info("report_updated report_id=%s blocks=%s", report.id, len(blocks))
     return report
 
@@ -463,9 +464,89 @@ def delete_report(session: Session, report_id: uuid.UUID) -> None:
     session.execute(delete(ReportBlock).where(ReportBlock.report_id == report_id))
     session.delete(report)
     session.commit()
+    invalidate_report_cache(report_id)
+
+
+# --- Report read cache --------------------------------------------------------
+# ``ReportBlock.data_json`` holds the whole GA4/GSC/Ahrefs/SE Ranking/ClickUp
+# payload a block renders from — a few hundred KB to a few MB per report — and
+# every read path funnels through get_report(): reopening a report, and each of
+# the html/pdf/md exports, which are separate requests. Finishing one report
+# means opening it, tweaking, exporting to check, tweaking again, exporting for
+# the client: the same payload pulled out of Supabase five or six times over.
+#
+# The blocks only change when the report is saved, so the cache is invalidated on
+# write rather than relying on the TTL for correctness. The TTL is the backstop
+# for the one case invalidation cannot cover: uvicorn is deployed single-process
+# (no --workers in the systemd unit), but if that ever changes, a write handled
+# by one process would leave another process's copy stale until it expires.
+REPORT_CACHE_TTL_SECONDS = 300.0
+# Bound on cached reports. Entries are large, so this is a memory ceiling first
+# and a hit-rate knob second — the working set is however many reports one
+# specialist has open, which is realistically one.
+_REPORT_CACHE_MAX_ENTRIES = 32
+_REPORT_CACHE: dict[uuid.UUID, tuple[float, dict, list[dict]]] = {}
+
+# Cached as plain values rather than ORM instances: a Report loaded in one
+# request's session must not outlive it, and rebuilding transient copies per hit
+# keeps every caller's signature — and its expectations — unchanged.
+_REPORT_SNAPSHOT_FIELDS = (
+    "id",
+    "client_id",
+    "period_label",
+    "default_comparison",
+    "customization",
+    "generated_by",
+    "generated_at",
+    "created_at",
+    "updated_at",
+)
+_BLOCK_SNAPSHOT_FIELDS = (
+    "id",
+    "report_id",
+    "block_type_key",
+    "position",
+    "data_json",
+    "comment",
+    "status",
+    "unavailable_reason",
+    "created_at",
+)
+
+
+def _snapshot(instance: object, fields: tuple[str, ...]) -> dict:
+    return {name: getattr(instance, name) for name in fields}
+
+
+def invalidate_report_cache(report_id: typing.Optional[uuid.UUID] = None) -> None:
+    """Drop one report's cached blocks, or the whole cache when given None."""
+    if report_id is None:
+        _REPORT_CACHE.clear()
+    else:
+        _REPORT_CACHE.pop(report_id, None)
+
+
+def _prune_report_cache(now: float) -> None:
+    for key, (expires_at, _, _) in list(_REPORT_CACHE.items()):
+        if expires_at <= now:
+            _REPORT_CACHE.pop(key, None)
+    # Expiry alone can leave the cache full of live entries; drop the one closest
+    # to expiring so an insert never grows past the ceiling.
+    while len(_REPORT_CACHE) >= _REPORT_CACHE_MAX_ENTRIES:
+        soonest = min(_REPORT_CACHE, key=lambda key: _REPORT_CACHE[key][0])
+        _REPORT_CACHE.pop(soonest, None)
 
 
 def get_report(session: Session, report_id: uuid.UUID) -> tuple[Report, list[ReportBlock]]:
+    now = time.monotonic()
+    cached = _REPORT_CACHE.get(report_id)
+    if cached is not None and cached[0] > now:
+        _, report_snapshot, block_snapshots = cached
+        return (
+            Report(**report_snapshot),
+            [ReportBlock(**snapshot) for snapshot in block_snapshots],
+        )
+
     report = session.get(Report, report_id)
     if report is None:
         raise LookupError("Report not found.")
@@ -473,6 +554,14 @@ def get_report(session: Session, report_id: uuid.UUID) -> tuple[Report, list[Rep
         session.execute(
             select(ReportBlock).where(ReportBlock.report_id == report_id).order_by(ReportBlock.position)
         ).scalars()
+    )
+
+    if len(_REPORT_CACHE) >= _REPORT_CACHE_MAX_ENTRIES:
+        _prune_report_cache(now)
+    _REPORT_CACHE[report_id] = (
+        now + REPORT_CACHE_TTL_SECONDS,
+        _snapshot(report, _REPORT_SNAPSHOT_FIELDS),
+        [_snapshot(block, _BLOCK_SNAPSHOT_FIELDS) for block in blocks],
     )
     return report, blocks
 

@@ -19,7 +19,19 @@ logger = logging.getLogger("rankberry.worker")
 def worker_loop(worker_name: str) -> None:
     settings = get_settings()
     service = get_run_service()
-    logger.info("worker_loop_started worker=%s poll_seconds=%s", worker_name, settings.queue_poll_seconds)
+    base_poll = settings.queue_poll_seconds
+    max_poll = max(getattr(settings, "queue_poll_max_seconds", base_poll), base_poll)
+    logger.info(
+        "worker_loop_started worker=%s poll_seconds=%s idle_poll_max_seconds=%s",
+        worker_name,
+        base_poll,
+        max_poll,
+    )
+
+    # Grows while the queue keeps coming back empty and resets the moment there
+    # is work, so an idle weekend costs a handful of queries an hour instead of
+    # one every two seconds, without slowing pickup while anyone is using the app.
+    idle_poll = base_poll
 
     while True:
         try:
@@ -27,12 +39,19 @@ def worker_loop(worker_name: str) -> None:
         except OperationalError as error:
             error_message = compact_error_message(error)
             logger.exception("run_claim_failed worker=%s error=%s", worker_name, error_message)
-            time.sleep(settings.queue_poll_seconds)
+            # A dropped connection reconnects on the next attempt, and each retry
+            # is a fresh TLS handshake — back off on these too rather than
+            # hammering a database that just told us it was unhappy.
+            time.sleep(idle_poll)
+            idle_poll = min(idle_poll * 2, max_poll)
             continue
 
         if claimed is None:
-            time.sleep(settings.queue_poll_seconds)
+            time.sleep(idle_poll)
+            idle_poll = min(idle_poll * 2, max_poll)
             continue
+
+        idle_poll = base_poll
 
         try:
             logger.info(

@@ -88,6 +88,7 @@ class Settings:
     request_timeout_seconds: float
     raw_output_retention_days: int
     queue_poll_seconds: float
+    queue_poll_max_seconds: float
     worker_concurrency: int
     enforce_one_active_run_per_user: bool
     total_iterations: int
@@ -177,6 +178,13 @@ def get_settings() -> Settings:
             int(_read_env("RAW_OUTPUT_RETENTION_DAYS", "30") or "30"), 1),
         queue_poll_seconds=max(
             float(_read_env("QUEUE_POLL_SECONDS", "2") or "2"), 0.5),
+        # Idle ceiling for the worker's queue poll. The 2s base is what a claimed
+        # run deserves; an empty queue at 3am does not, and polling it every 2s
+        # around the clock was a five-figure daily query count against Supabase
+        # for rows that were never there. The worker backs off to this when idle
+        # and snaps back to the base as soon as it claims anything.
+        queue_poll_max_seconds=max(
+            float(_read_env("QUEUE_POLL_MAX_SECONDS", "15") or "15"), 0.5),
         worker_concurrency=max(
             int(_read_env("WORKER_CONCURRENCY", "1") or "1"), 1),
         enforce_one_active_run_per_user=(

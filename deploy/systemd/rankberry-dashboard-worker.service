@@ -10,6 +10,17 @@ Group=rankberry
 WorkingDirectory=/srv/rankberry-dashboard
 EnvironmentFile=-/srv/rankberry-dashboard/.env
 Environment=WORKER_CONCURRENCY=1
+# The worker is one long-lived process polling a usually-empty queue, so the
+# default NullPool made it pay a full TLS handshake — certificate chain and all,
+# a few KB of egress — for every poll. A pooled connection it keeps open turns
+# each idle poll into a few hundred bytes instead. Safe on the Supabase
+# transaction pooler, which config.py rewrites the runtime URL to.
+Environment=DB_POOL_MODE=queue
+# One connection per worker thread; keep in step with WORKER_CONCURRENCY.
+Environment=DB_POOL_SIZE=1
+# Idle ceiling for the queue poll. Pickup stays at the 2s base while runs are
+# flowing; only an empty queue backs off this far.
+Environment=QUEUE_POLL_MAX_SECONDS=15
 ExecStart=/srv/rankberry-dashboard/.venv/bin/python3.9 -u -m backend.app.worker
 Restart=always
 RestartSec=5
