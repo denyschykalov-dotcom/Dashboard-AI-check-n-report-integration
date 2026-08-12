@@ -21,7 +21,9 @@ from backend.app.report_builder import settings_service
 from backend.app.report_builder.data_sources import periods
 from backend.app.report_builder.data_sources.periods import PeriodSelection
 from backend.app.report_builder.block_catalog import BLOCK_CATALOG, get_block
-from backend.app.report_builder.data_sources import ahrefs, ai_visibility, clickup, ga4, gsc, static_editorial
+from backend.app.report_builder.data_sources import (
+    ahrefs, ai_visibility, clickup, ga4, gsc, se_ranking, static_editorial,
+)
 from backend.app.report_builder.data_sources.ahrefs_client import AhrefsAccessError, resolve_report_dates
 from backend.app.report_builder.data_sources import clickup_client as clickup_client_module
 from backend.app.report_builder.data_sources.clickup_client import ClickUpAccessError, find_client_list
@@ -712,6 +714,78 @@ class AhrefsResolverTests(unittest.TestCase):
             self.assertEqual(mocked.call_count, first_call_count)
 
 
+class SeRankingResolverTests(unittest.TestCase):
+    """The tracked-keywords table reports only keywords the site actually ranks
+    for, best position first."""
+
+    # July 2026 → the report's current month is June 2026, previous May 2026.
+    NOW = datetime(2026, 7, 15, tzinfo=timezone.utc)
+
+    def setUp(self) -> None:
+        self.session = _make_session()
+        # A numeric target is taken as the project id, so no /sites call is made.
+        self.client = _client(self.session, name="Acme Co", domain="acme.com",
+                              se_ranking_target="4242")
+
+    def _context(self) -> ResolveContext:
+        return ResolveContext(client=self.client, period_label="", now=self.NOW,
+                              session=self.session)
+
+    @staticmethod
+    def _keyword(name, volume, current_pos, previous_pos):
+        return {"name": name, "volume": volume, "positions": [
+            {"date": "2026-05-20", "pos": previous_pos},
+            {"date": "2026-06-20", "pos": current_pos},
+        ]}
+
+    def _resolve(self, keywords):
+        with patch(
+            "backend.app.report_builder.data_sources.se_ranking_client.get_positions",
+            return_value=[{"site_engine_id": 1, "keywords": keywords}],
+        ):
+            return se_ranking.resolve(get_block("se_ranking_keywords"), self._context())
+
+    def test_unranked_keywords_are_left_out_and_rows_lead_with_the_best_position(self) -> None:
+        result = self._resolve([
+            self._keyword("never ranked", 900, 0, 0),        # 0 = outside tracked depth
+            self._keyword("page eleven", 800, 101, 99),      # past the reported range
+            self._keyword("mid", 100, 12, 20),
+            self._keyword("best", 50, 3, 4),
+            self._keyword("mid but bigger", 400, 12, 30),    # ties with "mid" on position
+            self._keyword("last ranked", 700, 99, 0),
+        ])
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(
+            [row[0] for row in result.data["keywords"]],
+            ["best", "mid but bigger", "mid", "last ranked"],
+            "positions 1-99 only, sorted best first, volume breaking ties",
+        )
+        # [name, volume, position, previous position]
+        self.assertEqual(result.data["keywords"][0], ["best", 50, 3, 4])
+        self.assertIn("1–99", result.data["note"])
+
+    def test_the_table_carries_at_most_a_hundred_keywords(self) -> None:
+        # 150 ranked keywords, worst position first, so the cap has to sort before
+        # it truncates for the best 100 to survive.
+        result = self._resolve([
+            self._keyword(f"kw{i}", 10, (150 - i) % 99 + 1, 50) for i in range(150)
+        ])
+        rows = result.data["keywords"]
+        self.assertEqual(len(rows), 100)
+        self.assertEqual(rows[0][2], 1)
+        self.assertEqual([row[2] for row in rows], sorted(row[2] for row in rows))
+
+    def test_no_ranked_keywords_still_resolves_ok(self) -> None:
+        result = self._resolve([self._keyword("never ranked", 900, 0, 0)])
+        self.assertEqual(result.status, "ok", "an empty table is not a failed block")
+        self.assertEqual(result.data["keywords"], [])
+
+    def test_missing_target_is_unavailable(self) -> None:
+        self.client.se_ranking_target = ""
+        result = se_ranking.resolve(get_block("se_ranking_keywords"), self._context())
+        self.assertEqual(result.status, "unavailable")
+
+
 class ServiceGenerateWithSheetsTests(unittest.TestCase):
     def test_generate_prefers_sheet_period_over_wallclock_default(self) -> None:
         session = _make_session()
@@ -776,35 +850,30 @@ class ServiceGenerateWithSheetsTests(unittest.TestCase):
             name = clickup._status_name({"status": {"status": label}})
             self.assertNotIn(name, (clickup._TODO_STATUS_NAME, clickup._DONE_STATUS_NAME))
 
-    def test_work_completed_anchors_on_tracked_time_not_date_done(self) -> None:
-        """Client lists are worked through a month and marked Done in a batch
-        early the next one, so date_done put July's work in the August report and
-        left July's empty. A DONE task belongs to the month of its last time
-        entry."""
+    @staticmethod
+    def _all_time_done_tasks():
+        """Three DONE tasks spread across two years, plus one never marked done."""
+        return [
+            {"id": "t1", "name": "Guest post writing", "url": "https://app.clickup.com/t/t1",
+             "status": {"status": "done", "type": "done"}, "date_done": "1783641600000",
+             "time_spent": "12600000", "assignees": []},           # 2026-07-10
+            {"id": "t2", "name": "Old technical audit", "url": "https://app.clickup.com/t/t2",
+             "status": {"status": "done", "type": "done"}, "date_done": "1741046400000",
+             "time_spent": "3600000", "assignees": []},            # 2025-03-04
+            {"id": "t3", "name": "August retainer work", "url": "https://app.clickup.com/t/t3",
+             "status": {"status": "done", "type": "done"}, "date_done": "1786060800000",
+             "assignees": []},                                     # 2026-08-07
+            {"id": "t4", "name": "Still in progress", "url": "https://app.clickup.com/t/t4",
+             "status": {"status": "doing", "type": "custom"}, "assignees": []},
+        ]
+
+    def _resolve_all_time(self, tasks, period_label="Jul 2026"):
         session = _make_session()
         user_id = uuid.uuid4()
         client = _client(session, name="Acme Co", domain="acme.com")
         settings_service.set_clickup_token(session, user_id, "pk_x")
-        tasks = [
-            # Worked in July, marked Done on 3 Aug — the case that was being lost.
-            {"id": "t1", "name": "Guest post writing", "url": "https://app.clickup.com/t/t1",
-             "status": {"status": "done", "type": "done"}, "date_done": "1786060800000",
-             "assignees": []},
-            # Worked and closed in August — must not appear in the July report.
-            {"id": "t2", "name": "August retainer work", "url": "https://app.clickup.com/t/t2",
-             "status": {"status": "done", "type": "done"}, "date_done": "1786060800000",
-             "assignees": []},
-        ]
-        # t1: two July entries (2h + 1h30). t2: one August entry.
-        time_by_task = {
-            "t1": [{"user": {"username": "Vlad"},
-                    "intervals": [{"start": "1783512000000", "time": "7200000"},
-                                  {"start": "1784116800000", "time": "5400000"}]}],
-            "t2": [{"user": {"username": "Alex"},
-                    "intervals": [{"start": "1786147200000", "time": "3600000"}]}],
-        }
         context = ResolveContext(
-            client=client, period_label="Jul 2026",
+            client=client, period_label=period_label,
             now=datetime(2026, 8, 6, tzinfo=timezone.utc), session=session, user_id=user_id,
         )
         with patch(
@@ -814,87 +883,51 @@ class ServiceGenerateWithSheetsTests(unittest.TestCase):
             "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
             return_value=tasks,
         ), patch(
-            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_task_time",
-            side_effect=lambda token, task_id: time_by_task.get(task_id, []),
-        ):
-            result = clickup.resolve(get_block("work_completed"), context)
+            "backend.app.report_builder.data_sources.clickup_client.fetch_task_time",
+        ) as task_time:
+            return clickup.resolve(get_block("work_completed"), context), task_time
+
+    def test_work_completed_lists_every_done_task_whatever_month_it_closed(self) -> None:
+        """The section is the client's record of delivered work, not a slice of
+        the report month: work closed in an earlier period stays listed."""
+        result, _ = self._resolve_all_time(self._all_time_done_tasks())
         self.assertEqual(result.status, "ok")
         data = result.data
-        self.assertEqual([t["name"] for t in data["tasks"]], ["Guest post writing"])
-        self.assertEqual(data["tasks"][0]["period_basis"], "tracked_time")
-        self.assertEqual(data["tasks"][0]["time_spent_ms"], 12600000)  # 3h30
-        self.assertEqual(data["tasks"][0]["time_by_user"], {"Vlad": 12600000})
-        self.assertEqual(data["total_time_spent_ms"], 12600000)
-
-    def test_work_completed_falls_back_to_date_done_when_untracked(self) -> None:
-        """Tasks nobody logged time on (e.g. ones predating time tracking) have
-        no month to anchor to — they keep the old date_done behaviour instead of
-        vanishing from the report."""
-        session = _make_session()
-        user_id = uuid.uuid4()
-        client = _client(session, name="Acme Co", domain="acme.com")
-        settings_service.set_clickup_token(session, user_id, "pk_x")
-        tasks = [{
-            "id": "t9", "name": "Untracked cleanup", "url": "https://app.clickup.com/t/t9",
-            "status": {"status": "done", "type": "done"},
-            "date_done": "1783771200000",  # 2026-07-10
-            "assignees": [],
-        }]
-        context = ResolveContext(
-            client=client, period_label="Jul 2026",
-            now=datetime(2026, 8, 6, tzinfo=timezone.utc), session=session, user_id=user_id,
+        # Every DONE task, whatever its month; the in-progress one still doesn't
+        # count. Most recently completed first, so the newest work leads.
+        self.assertEqual(
+            [t["name"] for t in data["tasks"]],
+            ["August retainer work", "Guest post writing", "Old technical audit"],
         )
-        with patch(
-            "backend.app.report_builder.data_sources.clickup.clickup_client.find_client_list",
-            return_value={"id": "list-1", "name": "acme"},
-        ), patch(
-            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
-            return_value=tasks,
-        ), patch(
-            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_task_time",
-            return_value=[],
-        ):
-            result = clickup.resolve(get_block("work_completed"), context)
-        data = result.data
-        self.assertEqual(data["count"], 1)
-        self.assertEqual(data["tasks"][0]["period_basis"], "date_done")
+        self.assertEqual(data["count"], 3)
+        self.assertEqual(data["total_time_spent_ms"], 16200000)
 
-    def test_work_completed_fails_loudly_when_tracked_time_unreadable(self) -> None:
-        """A rate-limited or forbidden tracked-time read must not be mistaken for
-        "no time tracked": that would silently re-anchor tasks on date_done and
-        publish the wrong month's work to a client."""
-        session = _make_session()
-        user_id = uuid.uuid4()
-        client = _client(session, name="Acme Co", domain="acme.com")
-        settings_service.set_clickup_token(session, user_id, "pk_x")
-        tasks = [{
-            "id": "t1", "name": "Guest post writing", "url": "https://app.clickup.com/t/t1",
-            "status": {"status": "done", "type": "done"},
-            "date_done": "1786060800000",  # 2026-08-07 — would wrongly land in Aug
-            "assignees": [],
-        }]
-        context = ResolveContext(
-            client=client, period_label="Aug 2026",
-            now=datetime(2026, 8, 6, tzinfo=timezone.utc), session=session, user_id=user_id,
-        )
-        with patch(
-            "backend.app.report_builder.data_sources.clickup.clickup_client.find_client_list",
-            return_value={"id": "list-1", "name": "acme"},
-        ), patch(
-            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
-            return_value=tasks,
-        ), patch(
-            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_task_time",
-            side_effect=ClickUpAccessError("ClickUp API rate limit reached (429) — try again later."),
-        ):
-            result = clickup.resolve(get_block("work_completed"), context)
-        self.assertEqual(result.status, "unavailable")
-        self.assertIn("tracked time", result.unavailable_reason)
-        self.assertIn("429", result.unavailable_reason)
+    def test_work_completed_ignores_the_report_period_entirely(self) -> None:
+        """Same list, a period the tasks predate — the report still shows them."""
+        tasks = self._all_time_done_tasks()
+        for label in ("Jul 2026", "2026-09", ""):
+            result, _ = self._resolve_all_time(tasks, period_label=label)
+            self.assertEqual(result.data["count"], 3, f"period label {label!r} must not scope the list")
+
+    def test_work_completed_does_no_per_task_time_lookups(self) -> None:
+        """Tracked time neither scopes this section nor appears in it, so the
+        per-task time-entry call (one per DONE task) must be gone."""
+        _, task_time = self._resolve_all_time(self._all_time_done_tasks())
+        task_time.assert_not_called()
+
+    def test_work_completed_takes_tracked_time_from_the_task_payload(self) -> None:
+        """ClickUp's own aggregate rides along with the list fetch; a task with
+        none, or an unparseable value, reads as zero rather than raising."""
+        tasks = self._all_time_done_tasks()
+        tasks[2]["time_spent"] = "not-a-number"
+        result, _ = self._resolve_all_time(tasks)
+        by_name = {t["name"]: t["time_spent_ms"] for t in result.data["tasks"]}
+        self.assertEqual(by_name["Guest post writing"], 12600000)
+        self.assertEqual(by_name["August retainer work"], 0)
 
     def test_clickup_get_rides_out_one_rate_limit(self) -> None:
         """One 429 is retried after the rate-limit window rather than failing the
-        block, since reading tracked time per DONE task can burst into the limit."""
+        call, since a generate can burst several list reads into the limit."""
         limited = MagicMock(status_code=429, content=b"", headers={"Retry-After": "0"})
         okay = MagicMock(status_code=200, content=b"{}", headers={})
         okay.json.return_value = {"data": []}
@@ -1310,7 +1343,7 @@ class ClickUpResolverTests(unittest.TestCase):
         self.assertEqual(result.status, "unavailable")
         self.assertIn("No ClickUp list found", result.unavailable_reason)
 
-    def test_done_lists_period_completions_todo_lists_open_tasks(self) -> None:
+    def test_done_lists_completed_tasks_todo_lists_open_tasks(self) -> None:
         settings_service.set_clickup_token(self.session, self.user_id, "pk_x")
         context = self._context(period_label="2025-06")
         with patch(
@@ -1323,8 +1356,8 @@ class ClickUpResolverTests(unittest.TestCase):
             completed = clickup.resolve(get_block("work_completed"), context)
             planned = clickup.resolve(get_block("planned_works"), context)
 
-        # DONE: only the "Done"-status task in June 2025 — "complete" (closed/
-        # archived) doesn't count, even though it was also closed that month.
+        # DONE: only the "Done"-status task — "complete" (closed/archived) is a
+        # different stage and doesn't count.
         self.assertEqual(completed.status, "ok")
         self.assertEqual(completed.data["count"], 1)
         self.assertEqual({t["name"] for t in completed.data["tasks"]}, {"Publish blog post"})
@@ -1338,10 +1371,10 @@ class ClickUpResolverTests(unittest.TestCase):
         # both blocks share a single tasks fetch via the context cache
         mocked_fetch.assert_called_once()
 
-    def test_done_excludes_tasks_completed_outside_the_period(self) -> None:
+    def test_done_keeps_tasks_completed_before_the_report_period(self) -> None:
         settings_service.set_clickup_token(self.session, self.user_id, "pk_x")
-        # Reporting July 2025: the June completions must NOT be re-listed, and a
-        # done task with no completion date is not counted for the period.
+        # Reporting July 2025 — the fixture's DONE task closed in June 2025 and
+        # must still be listed; both sections are period-independent now.
         context = self._context(period_label="2025-07")
         with patch(
             "backend.app.report_builder.data_sources.clickup.clickup_client.find_client_list",
@@ -1354,24 +1387,8 @@ class ClickUpResolverTests(unittest.TestCase):
             planned = clickup.resolve(get_block("planned_works"), context)
 
         self.assertEqual(completed.status, "ok")
-        self.assertEqual(completed.data["count"], 0)
-        # TODO is period-independent: the same "Todo"-status task remains the plan.
-        self.assertEqual(planned.data["count"], 1)
-
-    def test_done_parses_named_month_period_labels(self) -> None:
-        # Real saved reports use author-chosen labels like "Jun 2026" (matched
-        # verbatim against a GA4/GSC sheet's "Period" column), not "YYYY-MM".
-        settings_service.set_clickup_token(self.session, self.user_id, "pk_x")
-        context = self._context(period_label="Jun 2025")
-        with patch(
-            "backend.app.report_builder.data_sources.clickup.clickup_client.find_client_list",
-            return_value={"id": "list-1", "name": "onebyone (30)"},
-        ), patch(
-            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
-            return_value=_clickup_tasks_fixture(),
-        ):
-            completed = clickup.resolve(get_block("work_completed"), context)
         self.assertEqual(completed.data["count"], 1)
+        self.assertEqual(planned.data["count"], 1)
 
     def test_api_error_becomes_unavailable(self) -> None:
         settings_service.set_clickup_token(self.session, self.user_id, "pk_x")
@@ -1567,10 +1584,12 @@ class ClickUpRangeTests(unittest.TestCase):
         result = self._resolve_completed(selection)
         self.assertEqual(result.data["count"], 1)
 
-    def test_done_task_excluded_when_range_misses_completion_month(self) -> None:
+    def test_done_task_survives_a_range_that_misses_its_completion_month(self) -> None:
+        """A custom range scopes the metric blocks, not the work log — completed
+        work stays listed however the period is chosen."""
         selection = PeriodSelection(start=date(2025, 8, 1), end=date(2025, 9, 1))
         result = self._resolve_completed(selection)
-        self.assertEqual(result.data["count"], 0)
+        self.assertEqual(result.data["count"], 1)
 
 
 class ComparisonPresetTests(unittest.TestCase):
@@ -1723,7 +1742,7 @@ class PlannedWorkManualTests(unittest.TestCase):
 
 
 class TaskTableExportTests(unittest.TestCase):
-    def test_task_rows_lead_with_description_and_drop_category(self) -> None:
+    def test_task_rows_carry_only_the_title_and_id(self) -> None:
         import json as _json
         import re as _re
 
@@ -1751,15 +1770,11 @@ class TaskTableExportTests(unittest.TestCase):
         raw = raw.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
         data = _json.loads(raw)
         rows = data["workDone"]
-        # [summary, task, id, time, time_ms]: summary is the description, or the
-        # title when empty; time is the tracked time, blank when nobody logged
-        # any, and time_ms is the raw value the preview re-totals from.
-        self.assertEqual(
-            rows[0],
-            ["Wrote and published the spring guide.", "Publish blog post", "abc", "3h 30m", 12600000],
-        )
-        self.assertEqual(rows[1], ["Fix meta tags", "Fix meta tags", "def", "", 0])
-        self.assertEqual(data["workDoneTotal"], "3h 30m")
+        # [task, id] and nothing else: the ClickUp description and the tracked
+        # time are deliberately not reported in this section.
+        self.assertEqual(rows[0], ["Publish blog post", "abc"])
+        self.assertEqual(rows[1], ["Fix meta tags", "def"])
+        self.assertNotIn("workDoneTotal", data)
 
     @staticmethod
     def _work_blocks():
@@ -1804,8 +1819,8 @@ class TaskTableExportTests(unittest.TestCase):
         return _json.loads(raw)
 
     def test_excluded_tasks_are_dropped_from_the_client_report(self) -> None:
-        """A task struck off in the preview must not reach the client — in either
-        ClickUp section — and its hours must leave the total with it."""
+        """A task struck off in the preview must not reach the client, in either
+        ClickUp section."""
         session = _make_session()
         report = self._work_report(session)
         report_row, blocks = report_service.get_report(session, report.id)
@@ -1815,10 +1830,8 @@ class TaskTableExportTests(unittest.TestCase):
                 "work_completed": ["bad"], "planned_works": ["plan2"]}},
         )
         data = self._preview_data(doc)
-        self.assertEqual([r[2] for r in data["workDone"]], ["abc"])
+        self.assertEqual([r[1] for r in data["workDone"]], ["abc"])
         self.assertEqual([t["taskId"] for t in data["workPlanned"]], ["plan1"])
-        # 3h30 remains of the original 4h30 — the removed task's hour is gone.
-        self.assertEqual(data["workDoneTotal"], "3h 30m")
 
     def test_excluded_tasks_survive_in_the_editable_preview(self) -> None:
         """The editable preview keeps every task in the payload so "Restore all"
@@ -1835,7 +1848,7 @@ class TaskTableExportTests(unittest.TestCase):
             editable=True,
         )
         data = self._preview_data(doc)
-        self.assertEqual([r[2] for r in data["workDone"]], ["abc", "bad"])
+        self.assertEqual([r[1] for r in data["workDone"]], ["abc", "bad"])
         self.assertEqual([t["taskId"] for t in data["workPlanned"]], ["plan1", "plan2"])
         self.assertEqual(
             data["customization"]["excludedTasks"],
@@ -1862,7 +1875,7 @@ class TaskTableExportTests(unittest.TestCase):
         )
         self.assertIn("Publish blog post", md)
         self.assertNotIn("Wrong task", md)
-        self.assertIn("Total time tracked: 3h 30m", md)
+        self.assertNotIn("Total time tracked", md)
 
     def test_manual_planned_work_exports_as_text(self) -> None:
         import json as _json

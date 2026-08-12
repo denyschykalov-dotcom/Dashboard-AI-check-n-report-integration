@@ -211,24 +211,6 @@ def _task_id(url: str) -> str:
     return url.rstrip("/").split("/")[-1] if url else ""
 
 
-def _duration(ms: typing.Any) -> str:
-    """ClickUp tracked time as a client reads it: "3h 30m", "45m", "" for none.
-
-    Minutes are rounded, so anything under 30 seconds shows as empty rather than
-    a misleading "0m".
-    """
-    try:
-        total_minutes = round(int(ms) / 60000)
-    except (TypeError, ValueError):
-        return ""
-    if total_minutes <= 0:
-        return ""
-    hours, minutes = divmod(total_minutes, 60)
-    if hours and minutes:
-        return f"{hours}h {minutes}m"
-    return f"{hours}h" if hours else f"{minutes}m"
-
-
 def _build_data(
     *,
     period_label: str,
@@ -499,10 +481,11 @@ def _build_data(
         data["ahrefsLosers"] = mover(d.get("losers", []))
 
     # -- ClickUp work (b12/b13) --
-    # Each row is [summary, task, task_id, time]: the Summary column leads with a
-    # brief description (the task's ClickUp description, falling back to its
-    # title), the Task column keeps the title, Time is the tracked time logged
-    # against the task, and the Category column has been dropped.
+    # Each completed-work row is [task, task_id]: the task title is what the client
+    # reads, and the ClickUp id links back to it. The Summary/description and
+    # tracked-time columns were dropped from this block — tracked time is still
+    # what decides which month a task belongs to (see clickup._done_tasks), it just
+    # isn't reported.
     # Tasks the specialist struck off in the preview. Dropping them here rather
     # than in the template is what makes the client HTML, the PDF and the
     # Markdown export agree on one list.
@@ -521,18 +504,10 @@ def _build_data(
 
     def tasks(source_key):
         d = ok.get(source_key) or {}
-        out = []
-        for t in _kept(source_key, d.get("tasks", [])):
-            name = t.get("name", "")
-            description = (t.get("description") or "").strip()
-            summary = description or name
-            # The raw ms trails the formatted string so the preview can re-total
-            # the column when a row is struck off, without re-parsing "3h 30m".
-            out.append([
-                summary, name, _task_id(t.get("url", "")), _duration(t.get("time_spent_ms")),
-                int(t.get("time_spent_ms") or 0),
-            ])
-        return out
+        return [
+            [t.get("name", ""), _task_id(t.get("url", ""))]
+            for t in _kept(source_key, d.get("tasks", []))
+        ]
     # Planned works (the ClickUp "Todo" stage) renders as a numbered plan rather
     # than a table, so it carries the fields that make each item readable on its
     # own: what it is, when it's due, and who owns it.
@@ -550,15 +525,6 @@ def _build_data(
         return out
     if "work_completed" in ok:
         data["workDone"] = tasks("work_completed")
-        # Summed over the tasks that survive exclusion, so striking one off takes
-        # its hours out of the total too. The HTML re-totals from the rows it
-        # draws; this value is what the Markdown export prints.
-        dropped_done = set(excluded_tasks.get("work_completed") or ())
-        data["workDoneTotal"] = _duration(sum(
-            int(t.get("time_spent_ms") or 0)
-            for t in (ok["work_completed"] or {}).get("tasks", [])
-            if _task_id(t.get("url", "")) not in dropped_done
-        ))
     if "planned_works" in ok:
         planned = ok["planned_works"] or {}
         if planned.get("mode") == "manual":
@@ -1157,10 +1123,8 @@ def _md_se_ranking(data: dict) -> str:
 
 
 def _md_work_done(data: dict) -> str:
-    rows = [[r[0], r[1], r[2], r[3] if len(r) > 3 else ""] for r in (data.get("workDone") or [])]
-    table = _md_table(["Summary", "Task", "ID", "Time"], rows)
-    total = (data.get("workDoneTotal") or "").strip()
-    return f"{table}\n\n**Total time tracked: {total}**" if total else table
+    rows = [[r[0], r[1] if len(r) > 1 else ""] for r in (data.get("workDone") or [])]
+    return _md_table(["Task", "ID"], rows)
 
 
 def _md_planned_work(data: dict) -> str:

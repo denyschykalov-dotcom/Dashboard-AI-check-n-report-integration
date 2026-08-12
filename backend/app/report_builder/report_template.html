@@ -113,6 +113,9 @@ h2.blk-title .scope{margin-left:auto;text-transform:none;letter-spacing:0;font-w
 .pager button{border:1px solid var(--line);background:#fff;padding:4px 10px;border-radius:7px;
   font-size:12px;font-weight:600;color:var(--muted);cursor:pointer}
 .pager button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+/* An off-page of a print-all paged table (see pagedTable): hidden on screen, and
+   revealed by the print stylesheet, where the pager buttons are gone. */
+.pg-off{display:none}
 
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;
@@ -246,15 +249,13 @@ th.tr-rm-c,td.tr-rm-c{width:30px;text-align:center;padding-left:0;padding-right:
    close the report read as a matching pair. */
 .planlist.done>li{border-left-color:var(--green)}
 .planlist.done>li:before{background:var(--green)}
-.planlist .chip.time{background:#E6F4EA;border-color:#BFE3CD;color:#137333;font-weight:600}
-.plan-count .tot{margin-left:auto;font-size:12.5px}
-.plan-count .tot b{font-size:13.5px}
 .foot{margin-top:50px;text-align:center;color:var(--faint);font-size:12px}
 
 @media print{
   .controlbar{position:static;box-shadow:none}
   .toggle,.cb-right .btn,.tabs,.pager{display:none!important}
   .tabpane{display:block!important}
+  .pg-off{display:table-row-group!important}
   body{background:#fff}
   .block{page-break-inside:avoid}
   .cmt{border-color:#d0d0d0}
@@ -415,12 +416,15 @@ th.tr-rm-c,td.tr-rm-c{width:30px;text-align:center;padding-left:0;padding-right:
     <h2 class="blk-title"><span class="dot" style="background:var(--pink)"></span>SE Ranking — Tracked keywords</h2>
     <div class="card pad">
       <div class="warnbox" id="srNote"></div>
+      <div class="pager" id="srPager" style="margin-top:14px"></div>
       <div id="srTable" style="margin-top:14px"></div>
     </div>
   </section>
 
   <section class="block" id="b12">
-    <h2 class="blk-title"><span class="dot" style="background:var(--green)"></span>Work completed — {{PERIOD_LONG}}</h2>
+    <!-- No period in the heading: the section lists everything delivered to date,
+         not just the report month's tasks. -->
+    <h2 class="blk-title"><span class="dot" style="background:var(--green)"></span>Work completed</h2>
     <div class="card pad"><div id="doneTable"></div></div>
   </section>
 
@@ -906,11 +910,23 @@ function renderGA4(){
              evNames.map(([n,v])=>({label:n,cur:v.count,prev:(ep[n]||{}).count||0})),
              {showDelta:true});
 }
-function pagedTable(pagerId, tableId, data, buildRow, headHTML, perPage){
+// A long table split into pages, one pager button per page. With `printAll` every
+// page stays in the DOM as its own <tbody> (off-pages hidden on screen) and the
+// print stylesheet reveals them all — the pager buttons don't survive a print, so
+// a table that has more rows than fit one page would otherwise lose them in the
+// PDF export.
+function pagedTable(pagerId, tableId, data, buildRow, headHTML, perPage, printAll){
   perPage=perPage||10; const pages=Math.ceil(data.length/perPage);
   const pager=document.getElementById(pagerId); let cur=0;
-  function draw(){ const slice=data.slice(cur*perPage,(cur+1)*perPage);
-    document.getElementById(tableId).innerHTML=`<table>${headHTML}<tbody>${slice.map((r,i)=>buildRow(r,cur*perPage+i)).join('')}</tbody></table>`;
+  function body(page, active){
+    return `<tbody class="pg${page===active?'':' pg-off'}">${
+      data.slice(page*perPage,(page+1)*perPage).map((r,i)=>buildRow(r,page*perPage+i)).join('')}</tbody>`;
+  }
+  function draw(){
+    const bodies = printAll
+      ? Array.from({length:pages},(_,p)=>body(p,cur)).join('')
+      : body(cur,cur);
+    document.getElementById(tableId).innerHTML=`<table>${headHTML}${bodies}</table>`;
     pager.querySelectorAll('button').forEach((b,i)=>b.classList.toggle('on',i===cur)); }
   pager.innerHTML=''; for(let i=0;i<pages;i++){ const b=document.createElement('button');
     b.textContent=(i*perPage+1)+'–'+Math.min((i+1)*perPage,data.length); b.onclick=()=>{cur=i;draw();}; pager.appendChild(b);}
@@ -1063,12 +1079,25 @@ function renderGscTables(){
      <td class="r">${fnum(r.impressions)}</td><td class="r">${r.ctr.toFixed(1)}%</td><td class="r">${r.position.toFixed(1)}</td></tr>`;},
     `<thead><tr><th>Page</th><th class="r">Clicks</th><th class="r">Δ</th><th class="r">Impr.</th><th class="r">CTR</th><th class="r">Pos</th></tr></thead>`);
 }
+// The block carries up to 100 tracked keywords (best position first), which is far
+// too long to read as one table — it pages in twenties, same as the GSC tables.
+const _SR_PER_PAGE=20;
 function renderSER(){
   document.getElementById('srNote').innerHTML='⚠ '+esc(DATA.seranking.note);
-  document.getElementById('srTable').innerHTML=
-    `<table><thead><tr><th>Keyword</th><th class="r">Volume</th><th class="r">Position</th><th class="r">vs prev month</th></tr></thead><tbody>${
-    DATA.seranking.keywords.map(k=>`<tr><td>${esc(k[0])}</td><td class="r">${fnum(k[1])}</td><td class="r">${k[2]}</td>
-     <td class="r">${posChange(k[2],k[3])}</td></tr>`).join('')}</tbody></table>`;
+  const rows=DATA.seranking.keywords||[];
+  if(!rows.length){
+    document.getElementById('srPager').innerHTML='';
+    document.getElementById('srTable').innerHTML=
+      '<div class="muted small">No tracked keywords ranked in this period.</div>';
+    return;
+  }
+  pagedTable('srPager','srTable',rows,(k)=>
+    // A previous position of 0 means the keyword wasn't ranked at all then, so it
+    // has newly entered rather than dropped by that many places.
+    `<tr><td>${esc(k[0])}</td><td class="r">${fnum(k[1])}</td><td class="r">${k[2]}</td>
+     <td class="r">${k[3] ? posChange(k[2],k[3]) : '<span class="up">new</span>'}</td></tr>`,
+    `<thead><tr><th>Keyword</th><th class="r">Volume</th><th class="r">Position</th><th class="r">vs prev month</th></tr></thead>`,
+    _SR_PER_PAGE, true);
 }
 // --- removed ClickUp tasks ---------------------------------------------------
 // A ClickUp list can surface a task that doesn't belong in the client's report.
@@ -1115,54 +1144,38 @@ function wireTaskControls(host, blockKey){
     if(event.target.closest('button.tr-restore')) restoreTasks(blockKey);
   });
 }
-// Tracked time as the report prints it — mirrors the backend's _duration().
-function trackedDuration(ms){
-  const mins=Math.round((Number(ms)||0)/60000);
-  if(mins<=0) return '';
-  const h=Math.floor(mins/60), m=mins%60;
-  return h&&m ? (h+'h '+m+'m') : (h?h+'h':m+'m');
-}
 // One completed task as a card. Deliberately the same shape as planItem(): the
-// task is the headline, its description the detail, and its tracked time and
-// ClickUp id chips underneath — so Work completed and Planned works read as a
-// matching pair rather than a table followed by a plan.
+// task is the headline and its ClickUp id a chip underneath — so Work completed
+// and Planned works read as a matching pair rather than a table followed by a
+// plan. No description and no tracked time: this section reports what was done,
+// not how long it took.
 function doneItem(r, i){
-  // r: [summary, task, task_id, time, time_ms] — summary is the ClickUp
-  // description (falling back to the task name), time the tracked time.
-  const name=String(r[1]||'').trim()||('Task '+(i+1));
-  const desc=String(r[0]||'').trim();
-  const chips=[];
-  if(r[3]) chips.push('<span class="chip time">'+esc(r[3])+'</span>');
-  if(r[2]) chips.push('<span class="chip id"><a href="https://app.clickup.com/t/'+
-    esc(r[2])+'" target="_blank" rel="noopener">#'+esc(r[2])+'</a></span>');
-  // Tasks with no description carry the name as their summary — don't print it twice.
-  const showDesc = desc && desc!==name;
-  const rm = DATA.editable && r[2]
-    ? '<button class="tr-rm" data-task="'+esc(r[2])+
+  // r: [task, task_id]
+  const name=String(r[0]||'').trim()||('Task '+(i+1));
+  const id=String(r[1]||'');
+  const chips = id
+    ? '<div class="pi-meta"><span class="chip id"><a href="https://app.clickup.com/t/'+
+      esc(id)+'" target="_blank" rel="noopener">#'+esc(id)+'</a></span></div>'
+    : '';
+  const rm = DATA.editable && id
+    ? '<button class="tr-rm" data-task="'+esc(id)+
       '" title="Remove this task from the report">&times;</button>'
     : '';
   return '<li'+(rm?' class="has-rm"':'')+'><div class="pi-body">'+
-    '<div class="pi-name">'+esc(name)+'</div>'+
-    (showDesc?'<div class="pi-desc">'+planHighlight(desc)+'</div>':'')+
-    (chips.length?'<div class="pi-meta">'+chips.join('')+'</div>':'')+
-    '</div>'+rm+'</li>';
+    '<div class="pi-name">'+esc(name)+'</div>'+chips+'</div>'+rm+'</li>';
 }
 function taskTable(id, rows, blockKey){
   const rm = !!(DATA.editable && blockKey);
-  const shown = rm ? rows.filter(r=>!isRemoved(blockKey, r[2])) : rows;
+  const shown = rm ? rows.filter(r=>!isRemoved(blockKey, r[1])) : rows;
   const host = document.getElementById(id);
   if(!shown.length){
-    host.innerHTML='<div class="muted small">No tasks were completed in this period.</div>'+
+    host.innerHTML='<div class="muted small">No tasks have been completed yet.</div>'+
       removedNote(blockKey);
     wireTaskControls(host, blockKey);
     return;
   }
-  // Totalled over what is actually listed, so striking a task off takes its
-  // hours out of the total in the same click.
-  const total = trackedDuration(shown.reduce((sum,r)=>sum+(Number(r[4])||0), 0));
   host.innerHTML='<div class="plan-count"><b>'+shown.length+'</b> '+
-    (shown.length===1?'task':'tasks')+' completed this period'+
-    (total?'<span class="tot muted">Total time tracked: <b>'+esc(total)+'</b></span>':'')+'</div>'+
+    (shown.length===1?'task completed':'tasks completed')+'</div>'+
     '<ol class="planlist done">'+shown.map(doneItem).join('')+'</ol>'+
     removedNote(blockKey);
   wireTaskControls(host, blockKey);

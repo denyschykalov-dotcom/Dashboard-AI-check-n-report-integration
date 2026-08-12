@@ -18,9 +18,15 @@ from backend.app.report_builder.data_sources.base import BlockResult, ResolveCon
 from backend.app.report_builder.data_sources.se_ranking_client import SeRankingAccessError
 
 
-# Top keywords by search volume shown in the table (mirrors the
-# ahrefs_top_movers cap on how many rows a report block carries).
-_KEYWORDS_LIMIT = 30
+# How many keywords the table carries. A tracked project commonly follows several
+# hundred; the report shows the 100 best-ranking ones, paged in the template.
+_KEYWORDS_LIMIT = 100
+
+# Only keywords the site actually ranks for are reported. SE Ranking writes ``0``
+# for "not found within the tracked depth", so an unfiltered table fills up with
+# zero rows that tell a client nothing; 99 is the bottom of the useful range.
+_MIN_POSITION = 1
+_MAX_POSITION = 99
 
 
 def _anchor_date(context: ResolveContext) -> date:
@@ -56,13 +62,18 @@ def _load_keywords(site_id: int, dates: ReportDates) -> list[list]:
     rows = []
     for kw in keywords:
         positions = kw.get("positions") or []
+        current = _position_on_or_before(positions, date_to)
+        if not _MIN_POSITION <= current <= _MAX_POSITION:
+            continue
         rows.append([
             kw.get("name", ""),
             int(kw.get("volume") or 0),
-            _position_on_or_before(positions, date_to),
+            current,
             _position_on_or_before(positions, dates.previous.isoformat()),
         ])
-    rows.sort(key=lambda row: row[1], reverse=True)
+    # Best position first, so the table reads top-down as "where we stand"; volume
+    # breaks ties so the more valuable keyword of two at the same rank leads.
+    rows.sort(key=lambda row: (row[2], -row[1]))
     return rows[:_KEYWORDS_LIMIT]
 
 
@@ -84,6 +95,10 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
     return BlockResult.ok({
         "period": dates.current_label,
         "previous_period": dates.previous_label,
-        "note": f"Positions as of {dates.current_label}, compared to {dates.previous_label}.",
+        "note": (
+            f"Positions as of {dates.current_label}, compared to {dates.previous_label}. "
+            f"Showing the top {_KEYWORDS_LIMIT} keywords ranking in positions "
+            f"{_MIN_POSITION}–{_MAX_POSITION}; unranked keywords are left out."
+        ),
         "keywords": keywords,
     })

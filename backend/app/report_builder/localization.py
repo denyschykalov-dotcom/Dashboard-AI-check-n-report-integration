@@ -77,6 +77,9 @@ UI_STRINGS: tuple[str, ...] = (
     "Other",
     "No data.",
     "vs prev month",
+    # The SE Ranking marker for a keyword that had no previous position at all.
+    "new",
+    "No tracked keywords ranked in this period.",
     # -- section titles --------------------------------------------------------
     "Ahrefs — Domain analysis",
     "Ahrefs — Top movers (pages & keywords)",
@@ -219,10 +222,11 @@ UI_STRINGS: tuple[str, ...] = (
     # sits in its own element, so only the trailing phrase is a translatable key.
     "task planned for the next period",
     "tasks planned for the next period",
-    "task completed this period",
-    "tasks completed this period",
-    "Total time tracked:",
-    "No tasks were completed in this period.",
+    # Work completed is not scoped to the report month, so its count line and
+    # empty state carry no period.
+    "task completed",
+    "tasks completed",
+    "No tasks have been completed yet.",
     # -- search industry -------------------------------------------------------
     "Search industry",
     # -- months (short, then long) --------------------------------------------
