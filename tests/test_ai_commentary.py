@@ -374,7 +374,11 @@ class PlannedWorksPayloadTests(unittest.TestCase):
             client_domain="acme.com",
         )
 
-    def test_clickup_todo_tasks_carry_due_date_and_owners(self):
+    def test_clickup_todo_tasks_carry_the_due_date_only(self):
+        """Planned works mirrors Work completed: no assignee, no description.
+
+        Both are internal ClickUp detail the client's report doesn't carry.
+        """
         data = self._data({
             "block_type_key": "planned_works",
             "status": "ok",
@@ -388,10 +392,8 @@ class PlannedWorksPayloadTests(unittest.TestCase):
         })
         self.assertEqual(data["workPlanned"], [{
             "name": "Rewrite service pages",
-            "description": "Target head terms",
             "taskId": "abc123",
             "due": "2026-08-12",
-            "assignees": ["dana"],
         }])
 
     def test_a_manual_plan_still_renders_as_prose(self):

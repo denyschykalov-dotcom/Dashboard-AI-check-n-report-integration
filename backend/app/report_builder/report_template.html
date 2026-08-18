@@ -220,10 +220,6 @@ tbody tr:hover{background:#FBFCFE}
 .planlist .pi-body{grid-column:2;min-width:0}
 .planlist .pi-name{font-size:calc(14.5px * var(--sec-scale,1));font-weight:700;color:var(--ink);
   line-height:1.4}
-.planlist .pi-desc{margin-top:5px;font-size:13px;color:var(--muted);line-height:1.6;
-  white-space:pre-wrap;overflow-wrap:anywhere}
-.planlist .pi-desc .hl{color:var(--ink);font-weight:700;background:#FFF0F7;
-  border-radius:4px;padding:0 3px}
 .planlist .pi-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
 /* Preview-only: strike a wrong ClickUp task off a section. Rendered only when
    DATA.editable, so the client version never carries these controls. */
@@ -241,7 +237,6 @@ th.tr-rm-c,td.tr-rm-c{width:30px;text-align:center;padding-left:0;padding-right:
 .planlist .chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;
   background:#fff;border:1px solid var(--line);border-radius:999px;padding:2px 9px;color:var(--muted)}
 .planlist .chip.due{background:#FEF7E0;border-color:#F3E3B0;color:#7a5b00;font-weight:600}
-.planlist .chip.owner{background:var(--blue-lt);border-color:#D5E1FF;color:#174ea6}
 .planlist .chip.id{font-variant-numeric:tabular-nums}
 .planlist .chip.id a{color:var(--muted)}
 /* Work completed is the same numbered card list as Planned works, in the
@@ -1200,28 +1195,21 @@ function planDate(iso){
   const mo=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(m[2])-1];
   return mo ? (Number(m[3])+' '+mo+' '+m[1]) : String(iso);
 }
-// Highlight the concrete parts of a plan description — counts, percentages,
-// money — so each item's substance is visible at a glance.
-function planHighlight(text){
-  return esc(text).replace(/(\d+(?:[.,]\d+)*(?:\s?%)?)/g, '<span class="hl">$1</span>');
-}
+// One planned task as a card: the same shape as doneItem(), plus the due date.
+// No assignee and no ClickUp description — the client reads what is planned,
+// not who on the team owns it or what the internal ticket says.
 function planItem(t, i){
   const name=t.name||('Task '+(i+1));
   const chips=[];
   if(t.due) chips.push('<span class="chip due">Due '+esc(planDate(t.due))+'</span>');
-  (t.assignees||[]).forEach(a=>chips.push('<span class="chip owner">'+esc(a)+'</span>'));
   if(t.taskId) chips.push('<span class="chip id"><a href="https://app.clickup.com/t/'+
     esc(t.taskId)+'" target="_blank" rel="noopener">#'+esc(t.taskId)+'</a></span>');
-  // The description repeats the title on tasks that have none — don't print it twice.
-  const desc=(t.description||'').trim();
-  const showDesc = desc && desc!==String(name).trim();
   const rm = DATA.editable && t.taskId
     ? '<button class="tr-rm" data-task="'+esc(t.taskId)+
       '" title="Remove this task from the report">&times;</button>'
     : '';
   return '<li'+(rm?' class="has-rm"':'')+'><div class="pi-body">'+
     '<div class="pi-name">'+esc(name)+'</div>'+
-    (showDesc?'<div class="pi-desc">'+planHighlight(desc)+'</div>':'')+
     (chips.length?'<div class="pi-meta">'+chips.join('')+'</div>':'')+
     '</div>'+rm+'</li>';
 }

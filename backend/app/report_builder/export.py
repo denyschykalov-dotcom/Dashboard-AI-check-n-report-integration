@@ -509,18 +509,18 @@ def _build_data(
             for t in _kept(source_key, d.get("tasks", []))
         ]
     # Planned works (the ClickUp "Todo" stage) renders as a numbered plan rather
-    # than a table, so it carries the fields that make each item readable on its
-    # own: what it is, when it's due, and who owns it.
+    # than a table, and reads as the mirror of Work completed: the task and its
+    # due date, nothing else. The internal ClickUp description and the assignee
+    # are deliberately dropped — the client is told what is planned, not who on
+    # the team owns it or what the internal ticket notes say.
     def planned_items(source_key):
         d = ok.get(source_key) or {}
         out = []
         for t in _kept(source_key, d.get("tasks", [])):
             out.append({
                 "name": t.get("name", ""),
-                "description": (t.get("description") or "").strip(),
                 "taskId": _task_id(t.get("url", "")),
                 "due": t.get("due_date") or "",
-                "assignees": [a for a in (t.get("assignees") or []) if a],
             })
         return out
     if "work_completed" in ok:
@@ -1137,9 +1137,7 @@ def _md_planned_work(data: dict) -> str:
     lines = []
     for item in items:
         due = f" — due {item.get('due')}" if item.get("due") else ""
-        assignees = ", ".join(a for a in (item.get("assignees") or []) if a)
-        who = f" ({assignees})" if assignees else ""
-        lines.append(f"- **{item.get('name', '')}**{due}{who}: {item.get('description', '')} [#{item.get('taskId', '')}]")
+        lines.append(f"- **{item.get('name', '')}**{due} [#{item.get('taskId', '')}]")
     return "\n".join(lines)
 
 
