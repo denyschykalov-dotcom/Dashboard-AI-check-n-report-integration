@@ -826,10 +826,22 @@ function newsItem(line){
     '<div class="ni-body"><div class="ni-title">'+proseHTML(title)+'</div>'+
     (body?'<div class="ni-text">'+proseHTML(body)+'</div>':'')+'</div></div>';
 }
-/** The section's plain text as its news-list markup — one card per line. */
+/** The section's plain text as its news-list markup — one card per line.
+    The source shape is one item per line, each starting "LABEL — ". A stray
+    break inside an item (a citation boundary, a paste) would otherwise become
+    its own half-sentence card, so when the text uses labels at all, a labelless
+    line is the tail of the item above it rather than a new card. */
 function industryHTML(text){
-  const lines=String(text||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
-  if(!lines.length) return '';
+  const raw=String(text||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  if(!raw.length) return '';
+  const labelled=raw.some(function(l){ return !!newsLabel(l); });
+  const lines=[];
+  raw.forEach(function(line){
+    if(labelled && lines.length && !newsLabel(line)){
+      const i=lines.length-1;
+      lines[i]=(lines[i]+(/^[,.;:!?)]/.test(line)?'':' ')+line).trim();
+    } else lines.push(line);
+  });
   return '<div class="newslist">'+lines.map(newsItem).join('')+'</div>';
 }
 function renderIndustry(){

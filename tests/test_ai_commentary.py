@@ -185,6 +185,25 @@ class SearchIndustryTextTests(unittest.TestCase):
             "In July 2026, Google confirmed no update.",
         )
 
+    def test_answer_text_joins_citation_split_blocks_without_a_break(self):
+        """Citations split one sentence into several text blocks.
+
+        A newline between them broke a search-industry item into half-sentence
+        cards, because that section renders one card per line.
+        """
+        message = types.SimpleNamespace(
+            content=[
+                types.SimpleNamespace(type="web_search_tool_result", content=[]),
+                types.SimpleNamespace(type="text", text="NO UPDATE — No update in July"),
+                types.SimpleNamespace(type="text", text=", applying globally"),
+                types.SimpleNamespace(type="text", text="."),
+            ]
+        )
+        self.assertEqual(
+            AICommentaryClient._answer_text_of(message),
+            "NO UPDATE — No update in July, applying globally.",
+        )
+
     def test_answer_text_handles_a_turn_with_no_tool_use(self):
         message = types.SimpleNamespace(
             content=[types.SimpleNamespace(type="text", text="Just the answer.")]

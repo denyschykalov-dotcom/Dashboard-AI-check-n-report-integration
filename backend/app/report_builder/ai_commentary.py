@@ -803,6 +803,12 @@ class AICommentaryClient:
         search for…", then the searches, then the real write-up. Joining every
         text block the way :meth:`_text_of` does would paste that preamble into
         the report, so only the text after the last tool block counts.
+
+        The answer itself arrives as *many* text blocks: with citations on, the
+        API emits one block per cited span, so a single sentence is split at its
+        citation boundaries. They are concatenated as-is — a newline between them
+        would break one line into several, and the search-industry section renders
+        one card per line.
         """
         blocks = list(getattr(message, "content", None) or [])
         last_tool = -1
@@ -814,7 +820,7 @@ class AICommentaryClient:
             for block in blocks[last_tool + 1 :]
             if getattr(block, "type", None) == "text" and getattr(block, "text", None)
         ]
-        return "\n".join(parts).strip()
+        return "".join(parts).strip()
 
     @staticmethod
     def _text_of(message) -> str:
