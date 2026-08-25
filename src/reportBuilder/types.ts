@@ -76,6 +76,13 @@ export type ReportCustomization = {
    * edited into the block's data so a removal stays undoable.
    */
   excludedTasks: Record<string, string[]>;
+  /**
+   * The dashboard overview screenshot for the client's AI-check project, as an
+   * inline JPEG data URL. Captured at generate time with the same code as the
+   * overview's "Screenshot" button and stored with the report, so re-opening or
+   * re-exporting it shows the picture the report was built with.
+   */
+  aiVisibilityShot: string | null;
 };
 
 export type GenerateReportResponse = {

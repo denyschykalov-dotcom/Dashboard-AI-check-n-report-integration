@@ -109,6 +109,15 @@ h2.blk-title .scope{margin-left:auto;text-transform:none;letter-spacing:0;font-w
   font-size:13px;font-weight:600;color:var(--muted);cursor:pointer}
 .tabs button.on{background:var(--blue-lt);color:var(--blue)}
 .tabpane{display:none}.tabpane.on{display:block}
+/* SE Ranking bands: 20 rows visible, the rest scrolls. 20 rows x ~34px plus the
+   sticky header row; the header stays put so a scrolled band keeps its labels. */
+/* The dashboard's own overview picture for the client's AI-check project,
+   inlined as a JPEG data URL by the report builder. */
+.aivshot{display:block;width:100%;height:auto;border:1px solid var(--line);
+  border-radius:12px;margin-bottom:18px}
+.srscroll{max-height:734px;overflow-y:auto}
+.print-only{display:none}
+.srscroll thead th{position:sticky;top:0;background:var(--bg2);z-index:1}
 .pager{display:flex;gap:4px;margin-bottom:12px;flex-wrap:wrap}
 .pager button{border:1px solid var(--line);background:#fff;padding:4px 10px;border-radius:7px;
   font-size:12px;font-weight:600;color:var(--muted);cursor:pointer}
@@ -251,6 +260,9 @@ th.tr-rm-c,td.tr-rm-c{width:30px;text-align:center;padding-left:0;padding-right:
   .toggle,.cb-right .btn,.tabs,.pager{display:none!important}
   .tabpane{display:block!important}
   .pg-off{display:table-row-group!important}
+  /* A scroll box clips in a PDF — let every band print in full. */
+  .srscroll{max-height:none!important;overflow:visible!important}
+  .print-only{display:block!important}
   body{background:#fff}
   .block{page-break-inside:avoid}
   .cmt{border-color:#d0d0d0}
@@ -373,6 +385,7 @@ th.tr-rm-c,td.tr-rm-c{width:30px;text-align:center;padding-left:0;padding-right:
   <section class="block" id="b15">
     <h2 class="blk-title"><span class="dot" style="background:var(--teal)"></span>AI Visibility</h2>
     <div class="card pad">
+      <img id="aivShot" class="aivshot" alt="AI-check overview for this project" style="display:none">
       <div class="tabs" data-tabs="aiv" id="aivTabs"></div>
       <div id="aivBody"></div>
     </div>
@@ -411,8 +424,8 @@ th.tr-rm-c,td.tr-rm-c{width:30px;text-align:center;padding-left:0;padding-right:
     <h2 class="blk-title"><span class="dot" style="background:var(--pink)"></span>SE Ranking — Tracked keywords</h2>
     <div class="card pad">
       <div class="warnbox" id="srNote"></div>
-      <div class="pager" id="srPager" style="margin-top:14px"></div>
-      <div id="srTable" style="margin-top:14px"></div>
+      <div class="tabs" id="srTabs" style="margin-top:14px"></div>
+      <div id="srTable"></div>
     </div>
   </section>
 
@@ -1017,6 +1030,10 @@ function renderAI(){
 function renderAIVisibility(){
   const av=DATA.aiVisibility; const models=(av&&av.models)||[];
   const tabsEl=document.getElementById('aivTabs'), bodyEl=document.getElementById('aivBody');
+  // The dashboard overview screenshot, captured for this client's AI-check
+  // project when the report was generated. Absent on older reports.
+  const shotEl=document.getElementById('aivShot');
+  if(shotEl && CUS.aiVisibilityShot){ shotEl.src=CUS.aiVisibilityShot; shotEl.style.display='block'; }
   if(!models.length){ tabsEl.innerHTML=''; bodyEl.innerHTML=''; return; }
   function windowCard(w){
     if(w.status!=='ok') return `<div class="notebox">${esc(w.window_label)}: ${esc(w.reason||'No data.')}</div>`;
@@ -1086,25 +1103,47 @@ function renderGscTables(){
      <td class="r">${fnum(r.impressions)}</td><td class="r">${r.ctr.toFixed(1)}%</td><td class="r">${r.position.toFixed(1)}</td></tr>`;},
     `<thead><tr><th>Page</th><th class="r">Clicks</th><th class="r">Δ</th><th class="r">Impr.</th><th class="r">CTR</th><th class="r">Pos</th></tr></thead>`);
 }
-// The block carries up to 100 tracked keywords (best position first), which is far
-// too long to read as one table — it pages in twenties, same as the GSC tables.
-const _SR_PER_PAGE=20;
+// One tab per position band (Top 3 / 10 / 30 / 50 / 100), each already sorted by
+// search volume by the resolver. A band shows 20 rows and scrolls for the rest —
+// paging it as well would put two sets of controls on one table.
+//
+// Every band is rendered as a .tabpane and only the active one is shown: the
+// print stylesheet reveals all panes and drops the tab buttons, so a PDF carries
+// every band instead of just whichever one happened to be open.
 function renderSER(){
-  document.getElementById('srNote').innerHTML='⚠ '+esc(DATA.seranking.note);
-  const rows=DATA.seranking.keywords||[];
-  if(!rows.length){
-    document.getElementById('srPager').innerHTML='';
-    document.getElementById('srTable').innerHTML=
-      '<div class="muted small">No tracked keywords ranked in this period.</div>';
+  document.getElementById('srNote').innerHTML='\u26a0 '+esc(DATA.seranking.note);
+  const tabsEl=document.getElementById('srTabs'), tableEl=document.getElementById('srTable');
+  const buckets=(DATA.seranking.buckets||[]).filter(b=>(b.rows||[]).length);
+  if(!buckets.length){
+    tabsEl.innerHTML='';
+    tableEl.innerHTML='<div class="muted small">No tracked keywords ranked in this period.</div>';
     return;
   }
-  pagedTable('srPager','srTable',rows,(k)=>
-    // A previous position of 0 means the keyword wasn't ranked at all then, so it
-    // has newly entered rather than dropped by that many places.
-    `<tr><td>${esc(k[0])}</td><td class="r">${fnum(k[1])}</td><td class="r">${k[2]}</td>
-     <td class="r">${k[3] ? posChange(k[2],k[3]) : '<span class="up">new</span>'}</td></tr>`,
-    `<thead><tr><th>Keyword</th><th class="r">Volume</th><th class="r">Position</th><th class="r">vs prev month</th></tr></thead>`,
-    _SR_PER_PAGE, true);
+  function bandPane(b, active){
+    const more=(b.count||0)>b.rows.length
+      ? '<div class="txtnote">Showing the '+b.rows.length+' most-searched of '+b.count+
+        ' keywords in this band.</div>'
+      : '';
+    return '<div class="tabpane'+(active?' on':'')+'" data-b="'+esc(b.key)+'">'+
+      '<div class="chart-title print-only">'+esc(b.label)+'</div>'+
+      '<div class="srscroll"><table><thead><tr><th>Keyword</th><th class="r">Volume</th>'+
+      '<th class="r">Position</th><th class="r">vs prev month</th></tr></thead><tbody>'+
+      b.rows.map(k=>
+        // A previous position of 0 means the keyword wasn't ranked at all then, so
+        // it has newly entered rather than dropped by that many places.
+        '<tr><td>'+esc(k[0])+'</td><td class="r">'+fnum(k[1])+'</td><td class="r">'+k[2]+'</td>'+
+        '<td class="r">'+(k[3] ? posChange(k[2],k[3]) : '<span class="up">new</span>')+'</td></tr>').join('')+
+      '</tbody></table></div>'+more+'</div>';
+  }
+  tableEl.innerHTML=buckets.map((b,i)=>bandPane(b,i===0)).join('');
+  tabsEl.innerHTML=buckets.map((b,i)=>
+    '<button data-b="'+esc(b.key)+'" class="'+(i===0?'on':'')+'">'+esc(b.label)+
+    ' <span class="faint">'+b.count+'</span></button>').join('');
+  tabsEl.querySelectorAll('button').forEach(btn=>btn.onclick=()=>{
+    tabsEl.querySelectorAll('button').forEach(x=>x.classList.remove('on')); btn.classList.add('on');
+    tableEl.querySelectorAll('.tabpane').forEach(pane=>
+      pane.classList.toggle('on', pane.dataset.b===btn.dataset.b));
+  });
 }
 // --- removed ClickUp tasks ---------------------------------------------------
 // A ClickUp list can surface a task that doesn't belong in the client's report.

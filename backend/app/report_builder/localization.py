@@ -202,6 +202,12 @@ UI_STRINGS: tuple[str, ...] = (
     "Top-3 keywords",
     "Top-10 keywords",
     "Total (top)",
+    # position-band tabs, labelled by the resolver
+    "Top 3 (1\u20133)",
+    "Top 10 (4\u201310)",
+    "Top 30 (11\u201330)",
+    "Top 50 (31\u201350)",
+    "Top 100 (51\u2013100)",
     # -- AI visibility ---------------------------------------------------------
     "Brand mentions",
     "Domain mentions",

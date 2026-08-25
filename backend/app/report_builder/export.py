@@ -539,6 +539,9 @@ def _build_data(
     data["seranking"] = {
         "status": "ok" if sr else "unavailable",
         "note": (sr or {}).get("note", ""),
+        # One tab per position band (Top 3 / 10 / 30 / 50 / 100), each already
+        # sorted by search volume by the resolver.
+        "buckets": (sr or {}).get("buckets", []),
         "keywords": (sr or {}).get("keywords", []),
     }
 
@@ -651,8 +654,9 @@ def _normalize_customization(raw: typing.Optional[dict]) -> dict:
     reads, filling defaults so the template never has to guard for missing keys.
 
     Shape: ``accent`` (report-wide), ``charts`` (per chart-slot variant),
-    ``panels`` (per-block text config: size + heading/body weight), and
-    ``excludedTasks`` (ClickUp task ids the specialist struck off a block)."""
+    ``panels`` (per-block text config: size + heading/body weight),
+    ``excludedTasks`` (ClickUp task ids the specialist struck off a block) and
+    ``aiVisibilityShot`` (the dashboard overview screenshot as a data URL)."""
     raw = raw if isinstance(raw, dict) else {}
 
     accent = raw.get("accent")
@@ -664,11 +668,20 @@ def _normalize_customization(raw: typing.Optional[dict]) -> dict:
     panels_raw = raw.get("panels") if isinstance(raw.get("panels"), dict) else {}
     panels = {str(k): _normalize_panel(v) for k, v in panels_raw.items() if isinstance(v, dict)}
 
+    # The AI-visibility overview screenshot, an inline JPEG the report builder
+    # captured from the dashboard. Only a data: image URL is accepted — the value
+    # is written straight into an <img src>, so a remote or javascript: URL has no
+    # business being there.
+    shot = raw.get("aiVisibilityShot")
+    if not (isinstance(shot, str) and shot.startswith("data:image/")):
+        shot = None
+
     return {
         "accent": accent,
         "charts": charts,
         "panels": panels,
         "excludedTasks": _normalize_excluded_tasks(raw.get("excludedTasks")),
+        "aiVisibilityShot": shot,
     }
 
 
@@ -1117,9 +1130,15 @@ def _md_gsc_queries(data: dict) -> str:
 def _md_se_ranking(data: dict) -> str:
     sr = data.get("seranking") or {}
     note = (sr.get("note") or "").strip()
-    rows = [[kw[0], _md_num(kw[1]), _md_num(kw[2]), _md_num(kw[3])] for kw in (sr.get("keywords") or [])]
-    table = _md_table(["Keyword", "Volume", "Position", "Previous position"], rows)
-    return (f"_{note}_\n\n" if note else "") + table
+    headers = ["Keyword", "Volume", "Position", "Previous position"]
+    parts = []
+    for bucket in sr.get("buckets") or []:
+        rows = [[kw[0], _md_num(kw[1]), _md_num(kw[2]), _md_num(kw[3])] for kw in bucket.get("rows") or []]
+        if not rows:
+            continue
+        parts.append(f"**{bucket.get('label', '')}**\n\n" + _md_table(headers, rows))
+    body = "\n\n".join(parts) or "_No tracked keywords ranked in this period._"
+    return (f"_{note}_\n\n" if note else "") + body
 
 
 def _md_work_done(data: dict) -> str:

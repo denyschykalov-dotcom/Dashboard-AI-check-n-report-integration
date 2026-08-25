@@ -73,7 +73,7 @@ type ProjectListResponse = {
   projects: string[];
 };
 
-type OverviewUserOption = {
+export type OverviewUserOption = {
   user_id: string;
   username: string;
 };
@@ -114,14 +114,14 @@ type OverviewWindowStats = {
   spend_usd: number;
 };
 
-type OverviewStats = {
+export type OverviewStats = {
   user_half_year: OverviewWindowStats;
   user_active_runs: number;
   global_last_month: OverviewWindowStats;
   global_projects: number;
 };
 
-type MonthlyOverviewItem = {
+export type MonthlyOverviewItem = {
   month: string;
   label: string;
   brand_matches: number;
@@ -130,7 +130,7 @@ type MonthlyOverviewItem = {
   spend_usd: number;
 };
 
-type OverviewSummary = {
+export type OverviewSummary = {
   is_admin: boolean;
   stats: OverviewStats;
   project_options: string[];
@@ -984,19 +984,73 @@ async function captureElementAsJpeg(element: HTMLElement, filename: string) {
 }
 
 
-async function captureOverviewScreenshotJpeg(
-  data: {
-    width: number;
-    isAdmin: boolean;
-    projectLabel: string;
-    userLabel: string;
-    chartRangeMonths: number;
+/** The "Snapshot" cards under the overview charts.
+ *
+ * Module-level so the on-screen grid and the JPEG capture read from one source —
+ * the screenshot is meant to be the overview, not a second version of it. */
+function buildOverviewHighlights(args: {
+  isAdmin: boolean;
+  monthly: MonthlyOverviewItem[];
+  projectLabel: string;
+  userLabel: string;
+  chartRangeMonths: number;
+}): Array<{ label: string; value: string; meta: string }> {
+  const { isAdmin, monthly, projectLabel, userLabel } = args;
+  const rangeShortLabel = `${args.chartRangeMonths}M`;
+  const totalRuns = monthly.reduce((sum, item) => sum + item.total_runs, 0);
+  const totalBrandMatches = monthly.reduce((sum, item) => sum + item.brand_matches, 0);
+  const totalDomainMatches = monthly.reduce((sum, item) => sum + item.domain_matches, 0);
+  const totalSpend = monthly.reduce((sum, item) => sum + item.spend_usd, 0);
+  const bestMonth = monthly.reduce<MonthlyOverviewItem | null>((best, item) => {
+    const currentScore = item.total_runs + item.brand_matches + item.domain_matches;
+    const bestScore = best ? best.total_runs + best.brand_matches + best.domain_matches : -1;
+    return currentScore > bestScore ? item : best;
+  }, null);
+  const latestMonth = monthly[monthly.length - 1] || null;
 
-    highlights: Array<{ label: string; value: string; meta: string }>;
-    monthly: MonthlyOverviewItem[];
-  },
-  filename: string,
-) {
+  if (isAdmin) {
+    return [
+      { label: "Scope", value: userLabel, meta: "Admin analytics access" },
+      { label: "Project", value: projectLabel, meta: "Current overview filter" },
+      { label: `${rangeShortLabel} total runs`, value: String(totalRuns), meta: "Across the visible period" },
+      { label: `${rangeShortLabel} total spend`, value: formatUsd(totalSpend), meta: "Across the visible period" },
+      { label: "Best month", value: bestMonth?.label || "-", meta: bestMonth ? `${bestMonth.total_runs} runs / ${formatUsd(bestMonth.spend_usd)}` : "No activity yet" },
+      { label: "Latest month", value: latestMonth?.label || "-", meta: latestMonth ? `${latestMonth.total_runs} runs / ${formatUsd(latestMonth.spend_usd)}` : "No activity yet" },
+    ];
+  }
+
+  return [
+    { label: "Project", value: projectLabel, meta: "Current overview filter" },
+    { label: `${rangeShortLabel} total runs`, value: String(totalRuns), meta: "Across the visible period" },
+    { label: `${rangeShortLabel} brand matches`, value: String(totalBrandMatches), meta: "Across the visible period" },
+    { label: `${rangeShortLabel} domain matches`, value: String(totalDomainMatches), meta: "Across the visible period" },
+    { label: "Best month", value: bestMonth?.label || "-", meta: bestMonth ? `${bestMonth.total_runs} runs / ${bestMonth.brand_matches + bestMonth.domain_matches} matches` : "No activity yet" },
+    { label: "Latest month", value: latestMonth?.label || "-", meta: latestMonth ? `${latestMonth.total_runs} runs / ${latestMonth.brand_matches + latestMonth.domain_matches} matches` : "No activity yet" },
+  ];
+}
+
+
+export type OverviewCaptureData = {
+  width: number;
+  isAdmin: boolean;
+  projectLabel: string;
+  userLabel: string;
+  chartRangeMonths: number;
+
+  highlights: Array<{ label: string; value: string; meta: string }>;
+  monthly: MonthlyOverviewItem[];
+  /** Pixel density. Defaults to the screen's; the report passes 1 so the JPEG it
+   *  inlines stays a few hundred KB instead of a few MB. */
+  scale?: number;
+  quality?: number;
+};
+
+/** The overview panel painted onto a canvas and encoded as a JPEG.
+ *
+ * Returns the blob rather than saving it: the dashboard's "Screenshot" button
+ * downloads it, and the report builder inlines the same picture into the
+ * AI-visibility section. */
+export async function renderOverviewScreenshotBlob(data: OverviewCaptureData): Promise<Blob> {
   if (typeof document === "undefined" || typeof window === "undefined") {
     throw new Error("Screenshot capture is only available in the browser.");
   }
@@ -1018,7 +1072,7 @@ async function captureOverviewScreenshotJpeg(
   const totalHeight = Math.ceil(padding + chartsHeight + 28 + highlightGridHeight + 82 + padding);
 
   const canvas = document.createElement("canvas");
-  const scale = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  const scale = Math.max(1, Math.min(2, data.scale ?? window.devicePixelRatio ?? 1));
   canvas.width = Math.round(width * scale);
   canvas.height = Math.round(totalHeight * scale);
 
@@ -1533,17 +1587,53 @@ async function captureOverviewScreenshotJpeg(
     drawHighlightCard(item, x, y, cardWidth, highlightCardHeight, accent);
   });
 
-  const blob = await new Promise<Blob>((resolve, reject) => {
+  return await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((output) => {
       if (output) {
         resolve(output);
       } else {
         reject(new Error("Could not create the JPG screenshot."));
       }
-    }, "image/jpeg", 0.95);
+    }, "image/jpeg", data.quality ?? 0.95);
+  });
+}
+
+async function captureOverviewScreenshotJpeg(data: OverviewCaptureData, filename: string) {
+  downloadBlob(await renderOverviewScreenshotBlob(data), filename);
+}
+
+/** The dashboard overview for one project as an inline JPEG data URL — the same
+ *  picture the overview's "Screenshot" button saves. The report builder pastes
+ *  it into the report's AI-visibility section. */
+export async function renderOverviewScreenshotDataUrl(
+  summary: OverviewSummary,
+  options: { chartRangeMonths?: 6 | 12; width?: number } = {},
+): Promise<string> {
+  const chartRangeMonths = options.chartRangeMonths ?? 12;
+  const monthly = chartRangeMonths === 6 ? summary.monthly.slice(-6) : summary.monthly;
+  const projectLabel = summary.selected_project || "All projects";
+  const userLabel = summary.selected_user_id
+    ? summary.user_options.find((item) => item.user_id === summary.selected_user_id)?.username || "Selected user"
+    : "All users";
+
+  const blob = await renderOverviewScreenshotBlob({
+    width: options.width ?? 1440,
+    isAdmin: summary.is_admin,
+    projectLabel,
+    userLabel,
+    chartRangeMonths,
+    highlights: buildOverviewHighlights({ isAdmin: summary.is_admin, monthly, projectLabel, userLabel, chartRangeMonths }),
+    monthly,
+    scale: 1,
+    quality: 0.85,
   });
 
-  downloadBlob(blob, filename);
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("Could not read the overview screenshot."));
+    reader.readAsDataURL(blob);
+  });
 }
 
 export default function App() {
@@ -3013,6 +3103,18 @@ export default function App() {
     }
   }
 
+  /** The overview screenshot for one AI-check project, for the report builder's
+   *  AI-visibility section: that project's overview, painted with the same code
+   *  as the Screenshot button. Null when there is no session to fetch with. */
+  async function captureProjectOverviewShot(project: string): Promise<string | null> {
+    if (!sessionToken || !project.trim()) return null;
+    const summary = await apiRequest<OverviewSummary>("/api/overview/summary", {
+      token: sessionToken,
+      query: { project },
+    });
+    return await renderOverviewScreenshotDataUrl(summary);
+  }
+
   async function captureOverviewScreenshot() {
     if (!overviewCaptureRef.current) {
       setStatusMessage("Overview screenshot is not ready yet.");
@@ -3255,41 +3357,17 @@ export default function App() {
     return maxValue > 0 ? maxValue : 1;
   }, [visibleMonthly]);
 
-  const overviewHighlights = useMemo(() => {
-    const totalRuns = visibleMonthly.reduce((sum, item) => sum + item.total_runs, 0);
-    const totalBrandMatches = visibleMonthly.reduce((sum, item) => sum + item.brand_matches, 0);
-    const totalDomainMatches = visibleMonthly.reduce((sum, item) => sum + item.domain_matches, 0);
-    const totalSpend = visibleMonthly.reduce((sum, item) => sum + item.spend_usd, 0);
-    const bestMonth = visibleMonthly.reduce<(typeof visibleMonthly)[number] | null>(
-      (best, item) => {
-        const currentScore = item.total_runs + item.brand_matches + item.domain_matches;
-        const bestScore = best ? best.total_runs + best.brand_matches + best.domain_matches : -1;
-        return currentScore > bestScore ? item : best;
-      },
-      null,
-    );
-    const latestMonth = visibleMonthly[visibleMonthly.length - 1] || null;
-
-    if (overviewSummary?.is_admin) {
-      return [
-        { label: "Scope", value: selectedOverviewUserLabel, meta: "Admin analytics access" },
-        { label: "Project", value: selectedOverviewProjectLabel, meta: "Current overview filter" },
-        { label: `${chartRangeShortLabel} total runs`, value: String(totalRuns), meta: "Across the visible period" },
-        { label: `${chartRangeShortLabel} total spend`, value: formatUsd(totalSpend), meta: "Across the visible period" },
-        { label: "Best month", value: bestMonth?.label || "-", meta: bestMonth ? `${bestMonth.total_runs} runs / ${formatUsd(bestMonth.spend_usd)}` : "No activity yet" },
-        { label: "Latest month", value: latestMonth?.label || "-", meta: latestMonth ? `${latestMonth.total_runs} runs / ${formatUsd(latestMonth.spend_usd)}` : "No activity yet" },
-      ];
-    }
-
-    return [
-      { label: "Project", value: selectedOverviewProjectLabel, meta: "Current overview filter" },
-      { label: `${chartRangeShortLabel} total runs`, value: String(totalRuns), meta: "Across the visible period" },
-      { label: `${chartRangeShortLabel} brand matches`, value: String(totalBrandMatches), meta: "Across the visible period" },
-      { label: `${chartRangeShortLabel} domain matches`, value: String(totalDomainMatches), meta: "Across the visible period" },
-      { label: "Best month", value: bestMonth?.label || "-", meta: bestMonth ? `${bestMonth.total_runs} runs / ${bestMonth.brand_matches + bestMonth.domain_matches} matches` : "No activity yet" },
-      { label: "Latest month", value: latestMonth?.label || "-", meta: latestMonth ? `${latestMonth.total_runs} runs / ${latestMonth.brand_matches + latestMonth.domain_matches} matches` : "No activity yet" },
-    ];
-  }, [chartRangeShortLabel, overviewSummary, selectedOverviewProjectLabel, selectedOverviewUserLabel, visibleMonthly]);
+  const overviewHighlights = useMemo(
+    () =>
+      buildOverviewHighlights({
+        isAdmin: overviewSummary?.is_admin ?? false,
+        monthly: visibleMonthly,
+        projectLabel: selectedOverviewProjectLabel,
+        userLabel: selectedOverviewUserLabel,
+        chartRangeMonths,
+      }),
+    [chartRangeMonths, overviewSummary, selectedOverviewProjectLabel, selectedOverviewUserLabel, visibleMonthly],
+  );
 
   const startProjectGroups = useMemo(() => {
     if (!startProjectDialog) {
@@ -3757,7 +3835,7 @@ export default function App() {
             </section>
           )}
 
-          {page === "reportBuilder" && <ReportBuilderPage token={sessionToken} />}
+          {page === "reportBuilder" && <ReportBuilderPage token={sessionToken} captureOverviewShot={captureProjectOverviewShot} />}
 
           {page === "history" && (
             <section className="page active">

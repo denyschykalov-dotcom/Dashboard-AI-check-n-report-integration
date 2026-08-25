@@ -30,6 +30,13 @@ import type {
 
 type Props = {
   token: string | null;
+  /**
+   * The dashboard overview screenshot for one AI-check project, as an inline
+   * JPEG data URL — the same picture the overview's "Screenshot" button saves.
+   * Passed in from the dashboard rather than imported so this page and the
+   * dashboard don't import each other.
+   */
+  captureOverviewShot?: (project: string) => Promise<string | null>;
 };
 
 const PERIOD_OPTIONS: { value: PeriodPreset; label: string }[] = [
@@ -62,6 +69,7 @@ const DEFAULT_CUSTOMIZATION: ReportCustomization = {
   charts: {},
   panels: {},
   excludedTasks: {},
+  aiVisibilityShot: null,
 };
 
 // The block whose comment *is* the executive summary at the top of the report.
@@ -99,7 +107,7 @@ function summaryPlaceholderBlock(): GeneratedBlock {
   };
 }
 
-export default function ReportBuilderPage({ token }: Props) {
+export default function ReportBuilderPage({ token, captureOverviewShot }: Props) {
   const [catalog, setCatalog] = useState<ReportBlockType[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string>("");
@@ -668,6 +676,26 @@ export default function ReportBuilderPage({ token }: Props) {
     return response.text ?? "";
   }
 
+  /**
+   * The overview screenshot for this client's AI-check project.
+   *
+   * Null when no AI-visibility section was selected, when the dashboard did not
+   * pass a capture function, or when the capture fails — the section then simply
+   * renders without a picture rather than failing the whole generate.
+   */
+  async function captureAiVisibilityShot(): Promise<string | null> {
+    const project = selectedClient?.ai_visibility_project || selectedClient?.name || "";
+    const wantsAiVisibility = catalog.some(
+      (block) => selectedKeys.has(block.key) && block.ai_visibility_model,
+    );
+    if (!captureOverviewShot || !wantsAiVisibility || !project.trim()) return null;
+    try {
+      return await captureOverviewShot(project);
+    } catch {
+      return null;
+    }
+  }
+
   async function handleGenerate() {
     if (!token || !selectedClientId || selectedKeys.size === 0) return;
     setError(null);
@@ -704,7 +732,19 @@ export default function ReportBuilderPage({ token }: Props) {
       setComments(nextComments);
       setGenerated(response);
       setEditingReportId(null);
-      await refreshPreview(withComments(response.blocks, nextComments), response, customization);
+
+      // The AI-visibility section carries the dashboard's own overview picture
+      // for this client's AI-check project. Captured here, once, and threaded
+      // through as a local: setCustomization() would not have landed in time for
+      // the refreshPreview calls below.
+      let custom = customization;
+      const shot = await captureAiVisibilityShot();
+      if (shot !== customization.aiVisibilityShot) {
+        custom = { ...customization, aiVisibilityShot: shot };
+        setCustomization(custom);
+      }
+
+      await refreshPreview(withComments(response.blocks, nextComments), response, custom);
       setIsGenerating(false);
 
       // A client's GA4/GSC sheet may not have the requested month yet. The
@@ -732,7 +772,7 @@ export default function ReportBuilderPage({ token }: Props) {
       try {
         nextComments = { ...nextComments, ...(await draftComments(response)) };
         setComments(nextComments);
-        await refreshPreview(withComments(response.blocks, nextComments), response, customization);
+        await refreshPreview(withComments(response.blocks, nextComments), response, custom);
         setStatus("Claude drafted the section comments — review and edit them in the preview.");
       } catch (aiError) {
         setAiNotice(
@@ -757,7 +797,7 @@ export default function ReportBuilderPage({ token }: Props) {
         } else if (industry) {
           nextComments = { ...nextComments, [SEARCH_INDUSTRY_BLOCK_KEY]: industry };
           setComments(nextComments);
-          await refreshPreview(withComments(response.blocks, nextComments), response, customization);
+          await refreshPreview(withComments(response.blocks, nextComments), response, custom);
           setStatus("Claude added this month's search-industry context.");
         }
       }

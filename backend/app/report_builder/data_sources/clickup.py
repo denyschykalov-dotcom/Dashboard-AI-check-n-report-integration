@@ -7,11 +7,16 @@ ClickUp status label (not the broader open/closed status *type* — client lists
 commonly run a 4-stage workflow, e.g. todo -> doing -> done -> complete, and
 only the named "Done"/"Todo" stages belong in the report):
 
-* ``work_completed`` (DONE) — every task whose status is literally "Done" (not
-  "Complete"/closed-archived), whenever it was finished. The section is the
-  client's full record of delivered work rather than a per-month slice: scoping
-  it to the report period meant each report showed only its own month's tasks
-  and dropped everything delivered before it. Most recently completed first.
+* ``work_completed`` (DONE) — tasks whose status is literally "Done" (not
+  "Complete"/closed-archived) **and** that have tracked time inside the report
+  month. Any time entry touching the month qualifies the task, however short:
+  a task worked on across two months is listed in both reports.
+
+  The period test uses tracked time rather than the completion date on purpose:
+  client lists are worked through a month and marked Done in a batch early the
+  *next* one, so ``date_done`` puts July's work in the August report. A task
+  with no tracked time at all is not listed — there is no working time placing
+  it in any month.
 * ``planned_works`` (TODO) — tasks whose status is literally "Todo" (not
   "Doing" or any other in-progress/backlog status); these are the plans
   carried into the next period.
@@ -40,6 +45,82 @@ logger = logging.getLogger("rankberry.data_source.clickup")
 
 _DONE_STATUS_NAME = "done"
 _TODO_STATUS_NAME = "todo"
+
+_MONTH_NAMES = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10, "october": 10,
+    "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+# "2026-07" / "2026/07"
+_ISO_MONTH_RE = re.compile(r"^(\d{4})[-/](\d{1,2})$")
+# "07/2026"
+_NUMERIC_MONTH_YEAR_RE = re.compile(r"^(\d{1,2})/(\d{4})$")
+# "Jun 2026" / "June 2026" / "Jun, 2026"
+_NAME_MONTH_YEAR_RE = re.compile(r"^([A-Za-z]+)\.?,?\s+(\d{4})$")
+
+
+def _parse_period_label(label: typing.Optional[str]) -> typing.Optional[tuple[int, int]]:
+    """Best-effort parse of a free-form period label into (year, month).
+
+    Report periods are author-chosen strings (e.g. "Jun 2026", matched verbatim
+    against a "Period" column in GA4/GSC sheets) as well as the wall-clock
+    "YYYY-MM" default, so this accepts the common shapes rather than assuming one
+    fixed format. Returns None if unparseable.
+    """
+    text = (label or "").strip()
+    if not text:
+        return None
+
+    match = _ISO_MONTH_RE.match(text)
+    if match:
+        year, month = int(match.group(1)), int(match.group(2))
+        return (year, month) if 1 <= month <= 12 else None
+
+    match = _NUMERIC_MONTH_YEAR_RE.match(text)
+    if match:
+        month, year = int(match.group(1)), int(match.group(2))
+        return (year, month) if 1 <= month <= 12 else None
+
+    match = _NAME_MONTH_YEAR_RE.match(text)
+    if match:
+        month = _MONTH_NAMES.get(match.group(1).lower())
+        if month:
+            return (int(match.group(2)), month)
+
+    return None
+
+
+def _months_between(start: tuple[int, int], end: tuple[int, int]) -> set[tuple[int, int]]:
+    """Every (year, month) from ``start`` to ``end`` inclusive."""
+    months: set[tuple[int, int]] = set()
+    year, month = start
+    while (year, month) <= end:
+        months.add((year, month))
+        month += 1
+        if month > 12:
+            year, month = year + 1, 1
+    return months
+
+
+def _period_months(context: ResolveContext) -> set[tuple[int, int]]:
+    """The set of (year, month) the report covers.
+
+    For a custom range or full-year report every month in the selection counts.
+    Otherwise prefer the report's own period label (the same value GA4/GSC filter
+    on), falling back to the generation timestamp's month.
+    """
+    selection = context.period_selection
+    if selection is not None:
+        return _months_between(
+            (selection.start.year, selection.start.month),
+            (selection.end.year, selection.end.month),
+        )
+    parsed = _parse_period_label(context.period_label)
+    if parsed:
+        return {parsed}
+    return {(context.now.year, context.now.month)}
 
 
 def _epoch_ms_to_iso(value: typing.Optional[str]) -> typing.Optional[str]:
@@ -118,6 +199,41 @@ def _load_tasks(context: ResolveContext) -> dict[str, object]:
     return result
 
 
+def _tracked_months(context: ResolveContext, token: str, task_id: str) -> set[tuple[int, int]]:
+    """Every month this task has tracked time in, fetched at most once per task.
+
+    "Even partly" is taken literally: an entry is credited to every month it
+    touches, and its length is irrelevant — one logged minute places the task in
+    that month's report.
+
+    Costs one API call per candidate task, so it is only ever asked for tasks
+    already in the DONE stage (a handful per list), never the whole list.
+    """
+    cache_key = ("clickup_task_months", task_id)
+    if cache_key in context.cache:
+        return context.cache[cache_key]
+
+    # A failed lookup is deliberately *not* swallowed into "no time tracked":
+    # that would silently drop real work out of a client-facing report. Better to
+    # fail the block loudly than to publish a wrong month.
+    blocks: list[dict] = clickup_client.fetch_task_time(token, task_id) if task_id else []
+
+    months: set[tuple[int, int]] = set()
+    for block in blocks:
+        for interval in block.get("intervals") or []:
+            try:
+                start = int(interval["start"])
+                duration = max(0, int(interval["time"]))
+                begin = datetime.fromtimestamp(start / 1000, tz=timezone.utc)
+                end = datetime.fromtimestamp((start + duration) / 1000, tz=timezone.utc)
+            except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                continue
+            months |= _months_between((begin.year, begin.month), (end.year, end.month))
+
+    context.cache[cache_key] = months
+    return months
+
+
 def _status_name(task: dict) -> str:
     """A task's ClickUp status, normalized for comparison.
 
@@ -130,21 +246,22 @@ def _status_name(task: dict) -> str:
     return re.sub(r"[\s_\-]+", "", raw)
 
 
-def _done_tasks(tasks: list[dict]) -> list[dict[str, object]]:
-    """Every task in the "Done" status, whenever it was completed.
+def _done_tasks(
+    context: ResolveContext,
+    token: str,
+    tasks: list[dict],
+    period_months: set[tuple[int, int]],
+) -> list[dict[str, object]]:
+    """Tasks in the "Done" status with tracked time in the report month(s).
 
     Ordered most recently completed first; the few tasks ClickUp gives no
     completion date for sort to the end rather than dropping out.
-
-    Tracked time is read straight off the task (ClickUp's own aggregate, which
-    rides along with the list fetch). The block used to ask for each task's time
-    entries individually — one API call per done task — to work out which month
-    it belonged to; with the section no longer scoped to a period, and tracked
-    time no longer reported, those calls have no reason to happen.
     """
     items = []
     for task in tasks:
         if _status_name(task) != _DONE_STATUS_NAME:
+            continue
+        if not _tracked_months(context, token, str(task.get("id") or "")) & period_months:
             continue
         summary = _task_summary(task)
         try:
@@ -169,16 +286,28 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
 
     tasks = data["tasks"]
     if block.key == "work_completed":
-        items = _done_tasks(tasks)
+        months = _period_months(context)
+        try:
+            items = _done_tasks(context, str(data["token"]), tasks, months)
+        except ClickUpAccessError as error:
+            # Tracked time decides which month each task belongs to, so a failed
+            # read (rate limit, revoked token) can't be shrugged off — without it
+            # the block would report the wrong month's work.
+            return BlockResult.unavailable(f"Could not read ClickUp tracked time: {error}")
         total_ms = sum(int(item.get("time_spent_ms") or 0) for item in items)
+        # A "Done" task still drops out when it has no tracked time in the report
+        # month, so count both to tell "wrong status" apart from "wrong month".
+        done_any_month = sum(1 for task in tasks if _status_name(task) == _DONE_STATUS_NAME)
         log_event(
             logger,
             "clickup_block",
             block=block.key,
             list_name=data["list_name"],
             tasks_total=len(tasks),
-            status_done=len(items),
+            status_done=done_any_month,
+            in_period=len(items),
             tracked_hours=round(total_ms / 3600000, 2),
+            period_months=",".join(f"{y}-{m:02d}" for y, m in sorted(months)),
         )
         return BlockResult.ok({
             "list_name": data["list_name"],
