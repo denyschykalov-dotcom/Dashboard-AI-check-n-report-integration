@@ -88,12 +88,6 @@ class ClientSettingsRequest(BaseModel):
     ai_visibility_project: typing.Optional[str] = Field(default=None, max_length=200)
     # A bare sheet id or a pasted Google Sheets URL; empty restores auto-lookup.
     ga4_sheet_id: typing.Optional[str] = Field(default=None, max_length=300)
-    # What the Apps Script collector reads. A bare GA4 property id, or a pasted
-    # "properties/123" / GA4 URL. Empty clears it and the collector skips the site.
-    ga4_property_id: typing.Optional[str] = Field(default=None, max_length=100)
-    # e.g. "sc-domain:example.com" or "https://example.com/". Empty makes the
-    # collector probe both forms and keep whichever returns data.
-    gsc_property: typing.Optional[str] = Field(default=None, max_length=300)
 
 
 class GenerateReportRequest(BaseModel):

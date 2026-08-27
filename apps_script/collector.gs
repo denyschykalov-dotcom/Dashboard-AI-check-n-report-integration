@@ -1,86 +1,64 @@
 /**
  * Rankberry — Monthly SEO Report collector (v6, multi-site).
  *
- * ONE standalone Apps Script for every client. It finds (or creates) each
- * client's spreadsheet inside the shared Drive folder the report backend reads,
- * then fills every tab the backend expects, with the exact tab names and column
- * headers it matches on.
+ * ONE standalone Apps Script for every client. Per client it finds (or creates)
+ * the spreadsheet in the shared Drive folder, deletes tabs that are not current
+ * collector output, creates the ones that are missing, and fills them from GA4
+ * and Search Console.
+ *
+ * Self-contained: no backend, no API calls out, no tokens. Edit SITES below.
  *
  * Differences from v5 (the per-sheet bound script):
- *   - Standalone + multi-site: reads its client list from the dashboard API
- *     instead of a hardcoded CONFIG, so adding a client is a UI action.
+ *   - Multi-site and standalone, instead of one CONFIG bound to one sheet.
  *   - Creates the client spreadsheet in FOLDER_ID when it does not exist yet.
- *   - Adds the two tabs the backend reads but v5 never wrote:
+ *   - Adds the two tabs the report reads but v5 never wrote:
  *       "GA4 Ecommerce Organic" and "GA4 AI Ecommerce".
  *   - Auto-detects the working Search Console property string, which is what
- *     silently produced 0 clicks for yamahaonlineparts.com.
+ *     silently produced 0 clicks for yamahaonlineparts.com: a wrong-but-readable
+ *     property answers HTTP 200 with zero rows rather than an error.
  *   - Period labels are built from English month names, never Utilities
- *     .formatDate('MMM'), whose output follows the script locale. The backend
- *     parses them with Python "%b %Y" and would reject a localised month.
+ *     .formatDate('MMM'), whose output follows the script locale. The report
+ *     parses them with Python "%b %Y" and would drop a localised month.
  *   - One batched setValues() write per tab instead of appendRow() per row.
  *   - Owns the whole sheet: after a run, every "GA4 …" / "GSC …" tab is one this
  *     script authored. Leftovers from older versions under names nothing reads
- *     are removed, so a hand-made sheet stops being something to trust or audit.
+ *     are removed, so a hand-made sheet stops being something to audit.
  *
  * SETUP
- *   1. Project Settings → Script Properties, add two entries:
- *        BACKEND_BASE_URL   e.g. https://dashboard.example.com
- *        COLLECTOR_TOKEN    same value as COLLECTOR_TOKEN in the backend .env
- *      They live there, not in this file, so the token is never in source.
+ *   1. Fill ga4PropertyId for each entry in SITES below.
  *   2. Services → add "Google Analytics Data API" (identifier: AnalyticsData).
  *   3. The account running this needs read access to every GA4 property and
- *      every Search Console property.
- *   4. In the dashboard, set each client's "GA4 property ID". A client without
- *      one is skipped — the collector never guesses.
- *   5. Run testConnections() once, then setupMonthlyTrigger() once.
+ *      every Search Console property listed.
+ *   4. Run testConnections(), read the log, then setupMonthlyTrigger().
  *
- * Run runAll() to collect every site, or runSite('domain.com') for one.
+ * Run runAll() for every site, or runSite('domain.com') for one.
  */
 
 // ═══════════════════════════════════════════════════════
 //  CONFIG
 // ═══════════════════════════════════════════════════════
 
-/** The Drive folder the report backend scans for client sheets.
- *  A fallback only: fetchSites_() overwrites this with the backend's own value,
- *  so the two cannot drift. Matches GOOGLE_SHEETS_CLIENT_FOLDER_ID in .env. */
-let FOLDER_ID = '1yYQ_b603YmYGSHF2BJ-w29chWrplSEFa';
+/** The Drive folder the report reads client sheets from.
+ *  Same value as GOOGLE_SHEETS_CLIENT_FOLDER_ID in the backend .env. */
+const FOLDER_ID = '1yYQ_b603YmYGSHF2BJ-w29chWrplSEFa';
 
-/** Read-only endpoint listing which clients to collect and what to pull from.
- *  The dashboard owns that list, so adding a client never means editing this file. */
-function backendConfig_() {
-  const properties = PropertiesService.getScriptProperties();
-  const baseUrl = (properties.getProperty('BACKEND_BASE_URL') || '').replace(/\/+$/, '');
-  const token   = properties.getProperty('COLLECTOR_TOKEN') || '';
-  if (!baseUrl || !token) {
-    throw new Error(
-      'Set BACKEND_BASE_URL and COLLECTOR_TOKEN in Project Settings → Script Properties.'
-    );
-  }
-  return { baseUrl: baseUrl, token: token };
-}
-
-/** The clients to collect, newest dashboard state each run.
+/**
+ * One entry per client. This is the whole configuration.
  *
- *  Returns entries for every client, including ones the dashboard has not
- *  configured — each carries its own skip_reason so an unset property id shows
- *  up in this run's log instead of surfacing weeks later as an empty report. */
-function fetchSites_() {
-  const config = backendConfig_();
-  const response = UrlFetchApp.fetch(config.baseUrl + '/api/report-builder/collector-sites', {
-    method: 'get',
-    headers: { 'X-Collector-Token': config.token },
-    muteHttpExceptions: true,
-  });
-  const code = response.getResponseCode();
-  if (code !== 200) {
-    throw new Error('Site list request failed (HTTP ' + code + '): ' + response.getContentText());
-  }
-  const payload = JSON.parse(response.getContentText());
-  // The backend is the authority on the folder too, so both sides cannot drift.
-  if (payload.folder_id) FOLDER_ID = payload.folder_id;
-  return payload.sites || [];
-}
+ *   domain         the spreadsheet is named after it, and that name is how the
+ *                  report finds the sheet — so it must match the client's domain.
+ *   ga4PropertyId  numeric GA4 property id. Admin → Property details.
+ *   gscProperty    leave '' and the script probes "sc-domain:<domain>",
+ *                  "https://<domain>/" and the www form, then keeps whichever
+ *                  returns clicks. Better than pinning a string: a wrong one
+ *                  returns zeros instead of failing, so it breaks silently.
+ */
+const SITES = [
+  { domain: 'yamahaonlineparts.com', ga4PropertyId: '355243910', gscProperty: '' },
+  { domain: 'tarscoboltedtank.com',  ga4PropertyId: '509009564', gscProperty: '' },
+  { domain: 'partsvu.com',           ga4PropertyId: 'FILL_ME',   gscProperty: '' },
+  { domain: 'onebyone.ua',           ga4PropertyId: 'FILL_ME',   gscProperty: '' },
+];
 
 /** Which tabs to collect. Global, not per site: every tab the report backend
  *  reads is cheap to fill, and a site without ecommerce simply records zeros —
@@ -865,21 +843,20 @@ function collectSite_(site) {
   };
 }
 
-/** Load one fetched site into the CONFIG global. Returns null when unusable. */
+/** Load one SITES entry into the CONFIG global. Returns null when unusable. */
 function activate_(site) {
-  if (!site.collect || !site.ga4_property_id) {
-    Logger.log('⏭ ' + site.domain + ' skipped — ' +
-               (site.skip_reason || 'no GA4 property id set in the dashboard.'));
+  if (!site.ga4PropertyId || site.ga4PropertyId === 'FILL_ME') {
+    Logger.log('⏭ ' + site.domain + ' skipped — ga4PropertyId not set in SITES.');
     return null;
   }
-  const resolved = resolveGscProperty_(site.domain, site.gsc_property);
+  const resolved = resolveGscProperty_(site.domain, site.gscProperty);
   Logger.log(site.domain + ' GSC probe:\n  ' + resolved.notes.join('\n  '));
   if (!resolved.property) {
     Logger.log('⏭ ' + site.domain + ' skipped — no readable Search Console property.');
     return null;
   }
   CONFIG = {
-    GA4_PROPERTY_ID: site.ga4_property_id,
+    GA4_PROPERTY_ID: site.ga4PropertyId,
     GSC_PROPERTY:    resolved.property,
     FEATURES:        FEATURES,
   };
@@ -890,16 +867,15 @@ function activate_(site) {
 //  ENTRY POINTS
 // ═══════════════════════════════════════════════════════
 
-/** Collect every site the dashboard lists. One failure does not stop the rest.
+/** Collect every site in SITES. One failure does not stop the rest.
  *
  *  ponytail: a plain sequential loop. Roughly 1–2 minutes per site, so this fits
  *  the 30-minute Workspace execution limit up to ~12 sites. Past that, split
  *  into one trigger per site or add a continuation trigger. */
 function runAll() {
-  const sites   = fetchSites_();
   const summary = [];
-  Logger.log('Collecting ' + sites.length + ' site(s) from the dashboard.');
-  sites.forEach(site => {
+  Logger.log('Collecting ' + SITES.length + ' site(s).');
+  SITES.forEach(site => {
     if (!activate_(site)) { summary.push('⏭ ' + site.domain + ' skipped'); return; }
     try {
       const result = collectSite_(site);
@@ -915,8 +891,8 @@ function runAll() {
 
 /** Collect one site by domain — what to use after fixing a single client. */
 function runSite(domain) {
-  const site = fetchSites_().filter(s => s.domain === domain)[0];
-  if (!site) throw new Error('The dashboard lists no client with domain "' + domain + '".');
+  const site = SITES.filter(s => s.domain === domain)[0];
+  if (!site) throw new Error('No SITES entry for domain "' + domain + '".');
   if (!activate_(site)) throw new Error('Cannot collect ' + domain + ' — see the log.');
   const result = collectSite_(site);
   Logger.log('✅ ' + result.domain + ' → ' + result.period + '\n  ' + result.notes.join('\n  '));
@@ -937,14 +913,13 @@ function collectMonthlyData() {
  *  Logs only: a standalone script has no UI to alert into. */
 function testConnections() {
   const periods = getPeriods();
-  const sites   = fetchSites_();
   const results = [];
-  sites.forEach(site => {
+  SITES.forEach(site => {
     const lines = ['── ' + site.domain];
-    if (!site.ga4_property_id) {
-      lines.push('  ❌ GA4: ' + (site.skip_reason || 'no GA4 property id set in the dashboard'));
+    if (!site.ga4PropertyId || site.ga4PropertyId === 'FILL_ME') {
+      lines.push('  ❌ GA4: ga4PropertyId not set in SITES');
     } else {
-      CONFIG = { GA4_PROPERTY_ID: site.ga4_property_id, GSC_PROPERTY: '', FEATURES: FEATURES };
+      CONFIG = { GA4_PROPERTY_ID: site.ga4PropertyId, GSC_PROPERTY: '', FEATURES: FEATURES };
       try {
         const r = ga4Report({
           dateRanges: [{ startDate: periods.current.start, endDate: periods.current.end }],
@@ -956,7 +931,7 @@ function testConnections() {
         lines.push('  ❌ GA4: ' + e.message);
       }
     }
-    const probe = resolveGscProperty_(site.domain, site.gsc_property);
+    const probe = resolveGscProperty_(site.domain, site.gscProperty);
     probe.notes.forEach(n => lines.push('  ' + n));
     lines.push(probe.clicks > 0
       ? '  ✅ GSC property: ' + probe.property

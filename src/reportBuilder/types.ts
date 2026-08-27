@@ -29,10 +29,6 @@ export type Client = {
   domain: string;
   /** Sheet the GA4/GSC blocks read; null means auto-lookup by name in Drive. */
   ga4_sheet_id: string | null;
-  /** GA4 property the collector pulls from; null means it skips this client. */
-  ga4_property_id: string | null;
-  /** Search Console property the collector pulls from; null means it probes. */
-  gsc_property: string | null;
   clickup_list_id: string | null;
   se_ranking_target: string | null;
   /** AI-check project the AI-visibility blocks read from; null matches on name. */

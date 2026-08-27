@@ -123,8 +123,6 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
   const [aiProjects, setAiProjects] = useState<AiVisibilityProject[]>([]);
   const [seRankingInput, setSeRankingInput] = useState("");
   const [sheetInput, setSheetInput] = useState("");
-  const [ga4PropertyInput, setGa4PropertyInput] = useState("");
-  const [gscPropertyInput, setGscPropertyInput] = useState("");
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   // Blur-saving is invisible by nature, so the field itself has to show state:
   // accent-highlighted while a typed change is still unsaved, then a brief
@@ -309,14 +307,6 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
   useEffect(() => {
     setSheetInput(selectedClient?.ga4_sheet_id ?? "");
   }, [selectedClient?.id, selectedClient?.ga4_sheet_id]);
-
-  useEffect(() => {
-    setGa4PropertyInput(selectedClient?.ga4_property_id ?? "");
-  }, [selectedClient?.id, selectedClient?.ga4_property_id]);
-
-  useEffect(() => {
-    setGscPropertyInput(selectedClient?.gsc_property ?? "");
-  }, [selectedClient?.id, selectedClient?.gsc_property]);
 
   const loadSelection = useCallback(
     async (clientId: string) => {
@@ -506,8 +496,6 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
     se_ranking_target?: string;
     ai_visibility_project?: string;
     ga4_sheet_id?: string;
-    ga4_property_id?: string;
-    gsc_property?: string;
   }) {
     if (!token || !selectedClientId) return;
     setError(null);
@@ -527,15 +515,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
         2500,
       );
       setStatus(
-        patch.ga4_property_id !== undefined
-          ? patch.ga4_property_id
-            ? "GA4 property saved — the collector will pull this client on its next run."
-            : "GA4 property cleared — the collector will skip this client."
-        : patch.gsc_property !== undefined
-          ? patch.gsc_property
-            ? "Search Console property saved — the collector will use it as given."
-            : "Search Console property cleared — the collector will probe for the working one."
-        : patch.ga4_sheet_id !== undefined
+        patch.ga4_sheet_id !== undefined
           ? patch.ga4_sheet_id
             ? "GA4/GSC sheet set — regenerate to pull from it."
             : "GA4/GSC sheet cleared — it will be looked up by name in Drive again."
@@ -1411,98 +1391,6 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
                 ) : (
                   "Not set — the sheet is matched by client name in the shared Drive folder."
                 )}
-              </small>
-            </label>
-
-            {/* What the Apps Script collector pulls from when it fills the sheet
-                above. Without a GA4 property it skips this client entirely, so
-                the sheet keeps whatever month it already had. */}
-            <label className="field-stack">
-              <span>GA4 property ID — for the collector</span>
-              <input
-                className={`auth-input${
-                  ga4PropertyInput !== (selectedClient.ga4_property_id ?? "") ? " is-unsaved" : ""
-                }`}
-                value={ga4PropertyInput}
-                disabled={isSavingSettings}
-                onChange={(event) => setGa4PropertyInput(event.target.value)}
-                onBlur={() => {
-                  if (ga4PropertyInput !== (selectedClient.ga4_property_id ?? "")) {
-                    void saveClientSettings({ ga4_property_id: ga4PropertyInput });
-                  }
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") event.currentTarget.blur();
-                }}
-                placeholder="509009564 — or paste properties/509009564 or a GA4 URL"
-              />
-              {ga4PropertyInput !== (selectedClient.ga4_property_id ?? "") ? (
-                <small className="field-pending">
-                  Unsaved — press Enter or click outside the field to save.
-                </small>
-              ) : justSavedField === "ga4_property_id" ? (
-                <small className="field-saved">Saved.</small>
-              ) : null}
-              <small className="muted">
-                {selectedClient.ga4_property_id ? (
-                  <>
-                    The collector reads GA4 property{" "}
-                    <strong>{selectedClient.ga4_property_id}</strong> into the sheet each
-                    month.
-                  </>
-                ) : (
-                  "Not set — the collector skips this client, so its sheet is never refreshed."
-                )}{" "}
-                Find it in GA4 under Admin → Property details. A pasted{" "}
-                <code>properties/123</code> or GA4 URL is trimmed to the number.
-              </small>
-            </label>
-
-            {/* A wrong-but-readable Search Console property answers HTTP 200 with
-                zero rows, which is how a client collected 0 clicks for months
-                while every block still reported "ok". Empty is the safer value:
-                the collector then probes and keeps whichever form returns data. */}
-            <label className="field-stack">
-              <span>Search Console property — for the collector</span>
-              <input
-                className={`auth-input${
-                  gscPropertyInput !== (selectedClient.gsc_property ?? "") ? " is-unsaved" : ""
-                }`}
-                value={gscPropertyInput}
-                disabled={isSavingSettings}
-                onChange={(event) => setGscPropertyInput(event.target.value)}
-                onBlur={() => {
-                  if (gscPropertyInput !== (selectedClient.gsc_property ?? "")) {
-                    void saveClientSettings({ gsc_property: gscPropertyInput });
-                  }
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") event.currentTarget.blur();
-                }}
-                placeholder="Leave empty to auto-detect — or sc-domain:example.com"
-              />
-              {gscPropertyInput !== (selectedClient.gsc_property ?? "") ? (
-                <small className="field-pending">
-                  Unsaved — press Enter or click outside the field to save.
-                </small>
-              ) : justSavedField === "gsc_property" ? (
-                <small className="field-saved">Saved.</small>
-              ) : null}
-              <small className="muted">
-                {selectedClient.gsc_property ? (
-                  <>
-                    The collector queries <strong>{selectedClient.gsc_property}</strong> as
-                    given, with no fallback.
-                  </>
-                ) : (
-                  <>
-                    Empty — the collector tries <code>sc-domain:{selectedClient.domain}</code>,{" "}
-                    <code>https://{selectedClient.domain}/</code> and the{" "}
-                    <code>www.</code> form, then keeps whichever returns clicks.
-                  </>
-                )}{" "}
-                Leaving this empty is usually best: a valid-looking but wrong property
-                returns zero rows instead of an error, which reads as “no traffic”.
               </small>
             </label>
 

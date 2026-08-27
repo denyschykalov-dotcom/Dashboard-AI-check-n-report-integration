@@ -60,31 +60,6 @@ def list_clients(session: Session) -> list[Client]:
     return list(session.execute(select(Client).order_by(Client.name)).scalars())
 
 
-def list_collector_sites(session: Session) -> list[dict[str, object]]:
-    """The site list the Apps Script collector pulls from.
-
-    Every client is listed, configured or not, each carrying its own reason: the
-    collector logs a skip per unconfigured site so a missing property id is
-    visible in the run log instead of showing up weeks later as an empty report
-    section.
-    """
-    sites = []
-    for client in list_clients(session):
-        property_id = (client.ga4_property_id or "").strip()
-        sites.append(
-            {
-                "domain": client.domain,
-                "name": client.name,
-                "ga4_property_id": property_id or None,
-                # None tells the collector to probe for the working form.
-                "gsc_property": (client.gsc_property or "").strip() or None,
-                "collect": bool(property_id),
-                "skip_reason": None if property_id else "No GA4 property id set for this client.",
-            }
-        )
-    return sites
-
-
 def create_client(
     session: Session,
     *,
@@ -129,8 +104,6 @@ def update_client_settings(
     se_ranking_target: typing.Optional[str] = None,
     ai_visibility_project: typing.Optional[str] = None,
     ga4_sheet_id: typing.Optional[str] = None,
-    ga4_property_id: typing.Optional[str] = None,
-    gsc_property: typing.Optional[str] = None,
 ) -> Client:
     """Set the per-client links this client's data sources need.
 
@@ -149,35 +122,9 @@ def update_client_settings(
         # onto the client — fine when the folder holds one sheet per client,
         # wrong when it holds a live one and an abandoned one.
         client.ga4_sheet_id = _extract_sheet_id(ga4_sheet_id) or None
-    if ga4_property_id is not None:
-        client.ga4_property_id = _extract_ga4_property_id(ga4_property_id) or None
-    if gsc_property is not None:
-        # Empty restores the collector's probe, which is the better default than
-        # a stale string: a wrong-but-readable property returns zero rows, not an
-        # error, so it fails silently.
-        client.gsc_property = gsc_property.strip() or None
     session.commit()
     session.refresh(client)
     return client
-
-
-def _extract_ga4_property_id(value: str) -> str:
-    """Accept a bare GA4 property id, "properties/123", or a pasted GA4 URL.
-
-    Specialists copy this out of the GA4 admin screen or the URL bar, where it
-    arrives as "properties/509009564" or "...?p=509009564" — the collector needs
-    the bare digits.
-    """
-    text = (value or "").strip()
-    if not text:
-        return ""
-    if text.isdigit():
-        return text
-    match = re.search(r"(?:properties/|[?&]p=)(\d+)", text)
-    if match:
-        return match.group(1)
-    digits = re.sub(r"\D", "", text)
-    return digits
 
 
 def _extract_sheet_id(value: str) -> str:
@@ -627,8 +574,6 @@ def serialize_client(client: Client) -> dict[str, object]:
         "name": client.name,
         "domain": client.domain,
         "ga4_sheet_id": client.ga4_sheet_id,
-        "ga4_property_id": client.ga4_property_id,
-        "gsc_property": client.gsc_property,
         "clickup_list_id": client.clickup_list_id,
         "se_ranking_target": client.se_ranking_target,
         "ai_visibility_project": client.ai_visibility_project,
