@@ -18,6 +18,9 @@
  *     .formatDate('MMM'), whose output follows the script locale. The backend
  *     parses them with Python "%b %Y" and would reject a localised month.
  *   - One batched setValues() write per tab instead of appendRow() per row.
+ *   - Owns the whole sheet: after a run, every "GA4 …" / "GSC …" tab is one this
+ *     script authored. Leftovers from older versions under names nothing reads
+ *     are removed, so a hand-made sheet stops being something to trust or audit.
  *
  * SETUP
  *   1. Project Settings → Script Properties, add two entries:
@@ -163,11 +166,16 @@ function getOrCreateSpreadsheet_(domain) {
   return ss;
 }
 
+// Tabs this run authored, per site. The sweep below uses it to tell current
+// output from a previous script version's leftovers.
+let writtenTabs = null;
+
 /** Replace a tab's contents in one write.
  *
  *  Rows are padded/trimmed to the header width because setValues rejects a
  *  ragged array, and the backend maps values onto header cells by position. */
 function writeTab_(ss, name, header, rows) {
+  if (writtenTabs) writtenTabs[name] = true;
   let sh = ss.getSheetByName(name);
   if (!sh) sh = ss.insertSheet(name);
   sh.clear();
@@ -181,6 +189,45 @@ function writeTab_(ss, name, header, rows) {
   });
   sh.getRange(1, 1, data.length, width).setValues(data);
   return sh;
+}
+
+/**
+ * Delete tabs this run did not author, so the sheet is entirely script-owned.
+ *
+ * The point of this: a sheet set up by hand carries tabs from older script
+ * versions under names nothing reads — a real one held "GA4 AI Assistants"
+ * (Period/AI Source/Medium/Landing Page/Sessions/Users) where the report needs
+ * three differently-shaped tabs. Leaving it there means the next person cannot
+ * tell which tab is live, and the report silently used neither.
+ *
+ * Deliberately narrow about what it removes:
+ *   - a "GA4 …" or "GSC …" tab this run did not write is stale collector output
+ *   - a completely empty tab is the default sheet a new spreadsheet ships with
+ *     (its name is locale-dependent, so match on emptiness, not on "Sheet1")
+ *   - anything else — a colleague's notes tab — is kept and logged
+ *
+ * "Monthly History" is never touched: it is append-only and holds months that
+ * Search Console (16-month window) can no longer return.
+ */
+function sweepUnmanagedTabs_(ss) {
+  const removed = [];
+  const kept = [];
+  ss.getSheets().forEach(sh => {
+    const name = sh.getName();
+    if (writtenTabs[name] || name === 'Monthly History') return;
+    const isStaleCollectorTab = name.indexOf('GA4 ') === 0 || name.indexOf('GSC ') === 0;
+    const isEmpty = sh.getLastRow() === 0;
+    if (isStaleCollectorTab || isEmpty) {
+      // getSheets() gives a snapshot, so deleting while iterating it is safe.
+      ss.deleteSheet(sh);
+      removed.push(name);
+    } else {
+      kept.push(name);
+    }
+  });
+  if (removed.length) Logger.log('  removed stale tabs: ' + removed.join(', '));
+  if (kept.length) Logger.log('  left alone (not collector output): ' + kept.join(', '));
+  return removed;
 }
 
 /** GA4's `date` dimension returns "20260701"; emit "2026-07-01" so GA4 Daily
@@ -605,6 +652,7 @@ function collectSite_(site) {
   const F       = CONFIG.FEATURES;
   const ss      = getOrCreateSpreadsheet_(site.domain);
   const notes   = [];
+  writtenTabs   = {};
 
   // ── GA4 Summary ─────────────────────────────────
   const curP       = periods.current;
@@ -807,7 +855,14 @@ function collectSite_(site) {
     ['Timestamp', 'Note'],
     notes.map(n => [Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd HH:mm:ss'), n]));
 
-  return { domain: site.domain, sheetId: ss.getId(), period: curP.label, notes: notes };
+  // Last, and only on a run that got this far: a half-finished run must not
+  // strip the tabs it never reached.
+  const removed = sweepUnmanagedTabs_(ss);
+
+  return {
+    domain: site.domain, sheetId: ss.getId(), period: curP.label,
+    notes: notes, removedTabs: removed,
+  };
 }
 
 /** Load one fetched site into the CONFIG global. Returns null when unusable. */

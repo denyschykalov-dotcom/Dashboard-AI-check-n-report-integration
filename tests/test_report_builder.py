@@ -473,6 +473,23 @@ class GA4SheetResolverTests(unittest.TestCase):
         mocked_fetch.assert_called_once()
         mocked_titles.assert_called_once()
 
+    def test_ai_traffic_unavailable_when_the_three_ai_tabs_are_absent(self) -> None:
+        # Seen on yamahaonlineparts.com: the sheet carried one "GA4 AI Assistants"
+        # tab (Period/AI Source/Medium/Landing Page/Sessions/Users) instead of the
+        # three this reads. Real data, wrong name and shape — so the block must say
+        # the tabs are missing rather than report a section of zeros.
+        fixture = _ga4_sheet_fixture()
+        for tab in ["GA4 AI Summary", "GA4 AI Traffic", "GA4 AI Top Pages"]:
+            fixture.pop(tab, None)
+        fixture["GA4 AI Assistants"] = [
+            ["Period", "AI Source", "Medium", "Landing Page", "Sessions", "Users"],
+            ["Jun 2026", "chatgpt.com", "ai-assistant", "/", "74", "57"],
+        ]
+        with _patched_ga4_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = ga4.resolve(get_block("ga4_ai_traffic"), self._context())
+        self.assertEqual(result.status, "unavailable")
+        self.assertIn("GA4 AI Traffic", result.unavailable_reason)
+
     def test_alias_tab_name_used_when_canonical_missing(self) -> None:
         # This client's sheet uses "GA4 Overview" and "GA4 Key Events" instead
         # of "GA4 Summary" / "GA4 Events" — a real naming variant observed in

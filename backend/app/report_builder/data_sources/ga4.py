@@ -291,6 +291,19 @@ def _resolve_ai_traffic(tabs: dict, windows: Windows) -> BlockResult:
     tools_rows = periods.window_rows(tabs.get("GA4 AI Traffic", []), windows.current)
     top_pages_rows = periods.window_rows(tabs.get("GA4 AI Top Pages", []), windows.current)
 
+    # No rows in any of the three tabs means they were never collected, which is
+    # different from a site that genuinely had no AI traffic: that one still gets
+    # a summary row of zeros. Seen where a sheet carried one "GA4 AI Assistants"
+    # tab instead — real data under a name and shape nothing here reads. Saying
+    # so beats a section of zeros that reads as "no AI traffic".
+    current_summary = periods.window_rows(summary_rows, windows.current)
+    if not current_summary and not tools_rows and not top_pages_rows:
+        return BlockResult.unavailable(
+            "No AI-traffic data in the sheet for "
+            f"{windows.current.display} — it needs the tabs "
+            "'GA4 AI Summary', 'GA4 AI Traffic' and 'GA4 AI Top Pages'."
+        )
+
     tools = sorted(
         (
             {
