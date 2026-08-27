@@ -190,13 +190,22 @@ def _aggregate_items(
 def _resolve_summary(tabs: dict, windows: Windows, client_name: str) -> BlockResult:
     summary_rows = tabs.get("GSC Summary", [])
     positions_rows = tabs.get("GSC Positions", [])
+    current_kpi = _summary_kpi(periods.window_rows(summary_rows, windows.current))
+    # The collector writes Period rows with zeros when the sheet's Search Console
+    # property is misconfigured, so "rows exist" is not "data arrived". Shipping a
+    # section of zeros reads as a broken report; say the source is empty instead.
+    if not current_kpi or not (current_kpi["clicks"] or current_kpi["impressions"]):
+        return BlockResult.unavailable(
+            f"No Search Console clicks or impressions found for {windows.current.display} "
+            "— check the client sheet's GSC property."
+        )
     return BlockResult.ok(
         {
             "period": windows.current.display,
             "previous_period": windows.previous.display,
             "yoy_period": windows.yoy.display,
             "kpis": {
-                "current": _summary_kpi(periods.window_rows(summary_rows, windows.current)),
+                "current": current_kpi,
                 "previous": _summary_kpi(periods.window_rows(summary_rows, windows.previous)),
                 "yoy": _summary_kpi(periods.window_rows(summary_rows, windows.yoy)),
             },

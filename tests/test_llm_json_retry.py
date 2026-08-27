@@ -22,6 +22,7 @@ def build_settings() -> Settings:
         supabase_anon_key=None,
         google_sheets_credentials_file=None,
         google_sheets_client_folder_id=None,
+        collector_token=None,
         ahrefs_api_token=None,
         seranking_api_key=None,
         report_builder_secret_key=None,

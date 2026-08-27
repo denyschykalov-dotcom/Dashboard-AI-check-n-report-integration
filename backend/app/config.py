@@ -66,6 +66,10 @@ class Settings:
     supabase_anon_key: typing.Optional[str]
     google_sheets_credentials_file: typing.Optional[str]
     google_sheets_client_folder_id: typing.Optional[str]
+    # Shared secret the Apps Script collector sends to read its site list. The
+    # collector runs on a monthly trigger with no logged-in user, so it cannot
+    # carry a Supabase session. Unset disables the endpoint entirely.
+    collector_token: typing.Optional[str]
     ahrefs_api_token: typing.Optional[str]
     seranking_api_key: typing.Optional[str]
     report_builder_secret_key: typing.Optional[str]
@@ -136,6 +140,7 @@ def get_settings() -> Settings:
         supabase_anon_key=supabase_anon_key,
         google_sheets_credentials_file=_read_env("GOOGLE_SHEETS_CREDENTIALS_FILE"),
         google_sheets_client_folder_id=_read_env("GOOGLE_SHEETS_CLIENT_FOLDER_ID"),
+        collector_token=_read_env("COLLECTOR_TOKEN"),
         # Env var name preserves the existing project spelling ("ACHREVS_API").
         ahrefs_api_token=_read_env("AHREFS_API_TOKEN") or _read_env("ACHREVS_API"),
         seranking_api_key=_read_env("SERANKING_API_KEY"),

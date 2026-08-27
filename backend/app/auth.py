@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 
 import httpx
+import secrets
 from fastapi import Header, HTTPException, Request
 
 from backend.app.config import get_settings
@@ -89,3 +90,26 @@ def get_current_user(
 
     _TOKEN_CACHE[access_token] = (now + TOKEN_CACHE_TTL_SECONDS, user)
     return user
+
+
+def require_collector_token(
+    x_collector_token: typing.Optional[str] = Header(default=None),
+) -> None:
+    """Gate the collector's read-only site list behind a shared secret.
+
+    The Apps Script collector runs from a time trigger, so there is no Supabase
+    session to present. A static token in the environment is what it can hold.
+    Refuse when unset rather than defaulting to open: the list names every
+    client's GA4 and Search Console properties.
+    """
+    expected = (get_settings().collector_token or "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="Collector access is not configured. Set COLLECTOR_TOKEN on the backend.",
+        )
+    provided = (x_collector_token or "").strip()
+    # compare_digest, not ==, so a wrong token cannot be recovered one character
+    # at a time from response timing.
+    if not provided or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Invalid collector token.")

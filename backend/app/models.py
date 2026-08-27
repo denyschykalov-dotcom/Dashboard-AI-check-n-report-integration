@@ -123,6 +123,11 @@ class Client(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     domain: Mapped[str] = mapped_column(Text, nullable=False)
     ga4_sheet_id: Mapped[typing.Optional[str]] = mapped_column(Text)
+    # What the Apps Script collector pulls from when filling this client's sheet.
+    # NULL ga4_property_id means "not configured" and the collector skips the
+    # site; NULL gsc_property means "probe for it" (sc-domain: vs https:// form).
+    ga4_property_id: Mapped[typing.Optional[str]] = mapped_column(Text)
+    gsc_property: Mapped[typing.Optional[str]] = mapped_column(Text)
     clickup_list_id: Mapped[typing.Optional[str]] = mapped_column(Text)
     se_ranking_target: Mapped[typing.Optional[str]] = mapped_column(Text)
     # Which AI-check project the AI-visibility blocks read from. NULL falls back

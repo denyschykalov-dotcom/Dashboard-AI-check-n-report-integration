@@ -11,7 +11,8 @@ from fastapi.responses import Response
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from backend.app.auth import AuthenticatedUser, get_current_user
+from backend.app.auth import AuthenticatedUser, get_current_user, require_collector_token
+from backend.app.config import get_settings
 from backend.app.db import SessionLocal, get_db_session
 from backend.app.models import Client, Profile
 from backend.app.report_builder import ai_commentary
@@ -656,6 +657,23 @@ def list_ai_visibility_projects(
     return {"projects": report_service.list_ai_visibility_projects(session)}
 
 
+@router.get("/report-builder/collector-sites")
+def list_collector_sites(
+    session: Session = Depends(get_db_session),
+    _: None = Depends(require_collector_token),
+) -> dict[str, object]:
+    """The site list the Apps Script collector reads before filling the sheets.
+
+    Token-authenticated rather than session-authenticated: the collector runs on
+    a monthly trigger with no logged-in user. Read-only by design — the
+    collector writes to Google Sheets, never back to this API.
+    """
+    return {
+        "folder_id": get_settings().google_sheets_client_folder_id,
+        "sites": report_service.list_collector_sites(session),
+    }
+
+
 @router.put("/report-builder/clients/{client_id}/settings")
 def update_report_client_settings(
     client_id: uuid.UUID,
@@ -671,6 +689,8 @@ def update_report_client_settings(
             se_ranking_target=payload.se_ranking_target,
             ai_visibility_project=payload.ai_visibility_project,
             ga4_sheet_id=payload.ga4_sheet_id,
+            ga4_property_id=payload.ga4_property_id,
+            gsc_property=payload.gsc_property,
         )
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error

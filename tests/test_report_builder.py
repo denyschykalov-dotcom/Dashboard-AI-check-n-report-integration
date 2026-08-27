@@ -527,6 +527,21 @@ class GSCSheetResolverTests(unittest.TestCase):
             result = gsc.resolve(get_block("gsc_summary"), context)
         self.assertEqual(result.status, "unavailable")
 
+    def test_summary_unavailable_when_period_rows_are_all_zero(self) -> None:
+        # Seen on yamahaonlineparts.com: the collector wrote Period rows but the
+        # sheet's Search Console property returned nothing, so every metric is 0.
+        # Rows existing is not data arriving — the section must say so, not ship zeros.
+        fixture = _gsc_sheet_fixture()
+        fixture["GSC Summary"] = [
+            ["Period", "Clicks", "Impressions", "CTR %", "Avg Position"],
+            ["Jun 2026", "0", "0", "", ""],
+            ["May 2026", "0", "0", "", ""],
+        ]
+        with _patched_gsc_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = gsc.resolve(get_block("gsc_summary"), self._context())
+        self.assertEqual(result.status, "unavailable")
+        self.assertIn("GSC property", result.unavailable_reason)
+
     def test_alias_tab_name_used_when_canonical_missing(self) -> None:
         # This client's sheet uses "GSC Overview" and "GSC Top Queries" instead
         # of "GSC Summary" / "GSC Queries" — a real naming variant observed in
