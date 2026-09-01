@@ -106,5 +106,10 @@ def get(endpoint: str, params: dict[str, typing.Any]) -> dict[str, typing.Any]:
         if response.status_code == 429:
             raise AhrefsAccessError("Ahrefs API rate limit reached (429) — try again later.")
         if response.status_code != 200:
-            raise AhrefsAccessError(f"Ahrefs API returned {response.status_code}.")
+            # Ahrefs puts the reason in the body ({"error": "bad date"} and the
+            # like). Without it a 400 in the report says nothing anyone can act on.
+            detail = " ".join((response.text or "").split())[:200]
+            raise AhrefsAccessError(
+                f"Ahrefs API returned {response.status_code}" + (f": {detail}" if detail else ".")
+            )
         return response.json()

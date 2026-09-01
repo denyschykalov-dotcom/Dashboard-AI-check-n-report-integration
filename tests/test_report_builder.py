@@ -4,6 +4,7 @@ import unittest
 import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
@@ -739,6 +740,17 @@ class AhrefsResolverTests(unittest.TestCase):
         context = ResolveContext(client=client, period_label="", now=utcnow(), session=self.session)
         result = ahrefs.resolve(get_block("ahrefs_domain_analysis"), context)
         self.assertEqual(result.status, "unavailable")
+
+    def test_anchor_never_asks_ahrefs_for_an_unfinished_month(self) -> None:
+        # A range ending in the current month used to anchor on the month after
+        # it, and Ahrefs answers 400 "bad date" for a month that hasn't ended.
+        now = utcnow()
+        selection = SimpleNamespace(start=date(now.year, 1, 1), end=date(now.year, now.month, 28))
+        context = ResolveContext(
+            client=self.client, period_label="", now=now, session=self.session,
+            period_selection=selection,
+        )
+        self.assertLessEqual(ahrefs._anchor_date(context), now.date())
 
     def test_api_error_becomes_unavailable(self) -> None:
         with patch(

@@ -178,14 +178,21 @@ def _anchor_date(context: ResolveContext) -> date:
     last month of the selection (``resolve_report_dates`` reports the most recent
     *complete* month before the date it's given, so we pass the first day of the
     month after the range end). With no selection this is just today.
+
+    Never anchors in the future: Ahrefs has no snapshot for a month that hasn't
+    ended and answers `400 "bad date"`, which took the whole block down. A range
+    running into the current month (or a full-year report for the year in
+    progress) therefore anchors on today, and the block reports the last complete
+    month — its own labels say which month that is.
     """
     selection = context.period_selection
+    today = context.now.date()
     if selection is not None:
         end = selection.end
         year = end.year + (end.month // 12)
         month = (end.month % 12) + 1
-        return date(year, month, 1)
-    return context.now.date()
+        return min(date(year, month, 1), today)
+    return today
 
 
 def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
