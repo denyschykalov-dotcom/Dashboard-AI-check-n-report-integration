@@ -1009,11 +1009,21 @@ function renderAiRevenue(){
 function renderAI(){
   const c=DATA.aiSummary[P.cur], p=DATA.aiSummary[cmp()]; const ga4c=DATA.ga4[P.cur];
   const shareTot=ga4c.sessions?c.sessions/ga4c.sessions*100:0; const vsOrg=ga4c.organic?c.sessions/ga4c.organic*100:0;
-  document.getElementById('aiScore').innerHTML=
+  // Sales made by AI-referred visitors, shown here too — the same numbers the
+  // monetization block breaks down, but this is where they get read.
+  const aiEc=(DATA.aiEcom&&DATA.aiEcom[P.cur])||null, aiEcP=(DATA.aiEcom&&DATA.aiEcom[cmp()])||{purchases:0,revenue:0};
+  const hasSales=aiEc && (aiEc.purchases||aiEc.revenue);
+  const scoreEl=document.getElementById('aiScore');
+  scoreEl.style.gridTemplateColumns='repeat('+(hasSales?6:4)+',1fr)';
+  scoreEl.innerHTML=
     scEl('AI sessions', fnum(c.sessions), p.sessions?deltaHTML(c.sessions,p.sessions):'<span class="delta-pill up">New</span>', 'new channel')+
     scEl('Engaged', fnum(c.engaged), '', c.engRate.toFixed(1)+'% eng. rate')+
     scEl('Share of total', shareTot.toFixed(2)+'%', '', 'of all sessions')+
-    scEl('vs organic search', vsOrg.toFixed(1)+'%', '', 'of organic sessions');
+    scEl('vs organic search', vsOrg.toFixed(1)+'%', '', 'of organic sessions')+
+    (hasSales
+      ? scEl('AI sales', fnum(aiEc.purchases), deltaHTML(aiEc.purchases,aiEcP.purchases), 'purchases')+
+        scEl('AI revenue', fabbr(aiEc.revenue)+' ₴', deltaHTML(aiEc.revenue,aiEcP.revenue), 'from AI traffic')
+      : '');
   if(chartVariant('ai_tools','bars')==='donut') donut(document.getElementById('aiBars'), DATA.aiTools.map(t=>({label:t.source,value:t.sessions})));
   else hbars(document.getElementById('aiBars'), DATA.aiTools.map(t=>({label:t.source,cur:t.sessions,prev:0})));
   document.getElementById('aiPages').innerHTML=

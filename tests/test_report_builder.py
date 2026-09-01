@@ -358,6 +358,22 @@ class SheetsClientHelperTests(unittest.TestCase):
         result = resolve_periods(["Jun 2026", "not-a-period", ""])
         self.assertEqual(result["current"], "Jun 2026")
 
+    def test_num_parses_locale_formatted_sheet_values(self) -> None:
+        # Sheets returns formatted values: a UA/EU sheet writes revenue as
+        # "12 345,67" and a currency cell keeps its symbol.
+        for raw, expected in (
+            ("12 345,67", 12345.67),
+            ("1 234", 1234.0),
+            ("₴12,345.67", 12345.67),
+            ("1,234", 1234.0),
+            ("12,5", 12.5),
+            ("-1 234,5", -1234.5),
+            (1234, 1234.0),
+            ("", 0.0),
+            (None, 0.0),
+        ):
+            self.assertAlmostEqual(periods.num(raw), expected, msg=repr(raw))
+
 
 @contextmanager
 def _patched_ga4_sheet(fixture=None, tab_titles=None):

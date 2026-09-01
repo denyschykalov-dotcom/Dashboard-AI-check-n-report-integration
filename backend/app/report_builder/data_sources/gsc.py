@@ -235,16 +235,28 @@ def _resolve_top_queries(tabs: dict, windows: Windows) -> BlockResult:
     if not query_rows and not page_rows:
         return BlockResult.unavailable(f"No query/page data found for {windows.current.display}.")
 
-    queries = _aggregate_items(query_rows, "Query", "query")
-    pages = _aggregate_items(page_rows, "Page", "page")
+    queries = _aggregate_items(query_rows, "Query", "query")[:_TOP_LIMIT]
+    pages = _aggregate_items(page_rows, "Page", "page")[:_TOP_LIMIT]
 
-    return BlockResult.ok(
-        {
-            "period": windows.current.display,
-            "queries": queries[:_TOP_LIMIT],
-            "pages": pages[:_TOP_LIMIT],
-        }
-    )
+    def _comparison(tab: str, key_field: str, label_key: str, shown: list, window) -> list:
+        # Only the rows the report actually shows: a query sitting at #45 last
+        # month still needs its previous numbers so the table can draw an
+        # up/down arrow, but the rest of that month's tail is payload for nobody.
+        wanted = {item[label_key] for item in shown}
+        rows = periods.window_rows(tabs.get(tab, []), window)
+        return [item for item in _aggregate_items(rows, key_field, label_key) if item[label_key] in wanted]
+
+    data: dict[str, object] = {
+        "period": windows.current.display,
+        "previous_period": windows.previous.display,
+        "yoy_period": windows.yoy.display,
+        "queries": queries,
+        "pages": pages,
+    }
+    for suffix, window in (("previous", windows.previous), ("yoy", windows.yoy)):
+        data[f"queries_{suffix}"] = _comparison("GSC Queries", "Query", "query", queries, window)
+        data[f"pages_{suffix}"] = _comparison("GSC Top Pages", "Page", "page", pages, window)
+    return BlockResult.ok(data)
 
 
 def resolve(block: BlockType, context: ResolveContext) -> BlockResult:

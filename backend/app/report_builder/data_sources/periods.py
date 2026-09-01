@@ -20,6 +20,7 @@ snapshot metrics (position buckets) use the window's most recent month.
 
 from __future__ import annotations
 
+import re
 import typing
 
 from dataclasses import dataclass
@@ -297,10 +298,32 @@ def _range_window(by_date: dict[date, str], months: list[date], report_type: str
 # --- aggregation helpers -----------------------------------------------------
 
 
+# Sheets values come back FORMATTED, so a number carries the spreadsheet's
+# locale: "12 345,67" (UA/EU), "₴12,345.67", "1 234" with a non-breaking space.
+# Everything that is not a digit, separator or sign is dropped before parsing.
+_NUM_JUNK = re.compile(r"[^0-9,.\-]")
+_THOUSANDS_COMMA = re.compile(r"-?\d{1,3}(,\d{3})+$")
+
+
 def num(value: typing.Any) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    text = _NUM_JUNK.sub("", str(value))
+    if not text:
+        return 0.0
+    if "," in text and "." in text:
+        # the separator that comes last is the decimal one
+        text = (
+            text.replace(",", "")
+            if text.rfind(".") > text.rfind(",")
+            else text.replace(".", "").replace(",", ".")
+        )
+    elif "," in text:
+        # "1,234" is thousands; "12,5" is a decimal comma
+        text = text.replace(",", "") if _THOUSANDS_COMMA.match(text) else text.replace(",", ".")
     try:
-        return float(str(value).replace(",", "").strip())
-    except (TypeError, ValueError):
+        return float(text)
+    except ValueError:
         return 0.0
 
 

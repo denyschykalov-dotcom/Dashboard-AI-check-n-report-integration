@@ -844,17 +844,22 @@ def write_report_comments(
         default_comparison=payload.default_comparison,
         blocks=blocks,
     )
-    try:
-        comments = ai_client.generate_block_comments(context=context, block_keys=block_keys)
-    except ai_commentary.AICommentaryUnavailable as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
-
-    # Comments are written in English so Claude reasons over the report in one
-    # language, then translated as a second request when the client reads another.
-    # A translation failure leaves the English draft in place rather than losing it.
+    # Comments are written in the client's report language directly — a second
+    # translation request used to leave English text wherever a batch was dropped.
     language = _client_language(client)
-    if localization.needs_translation(language) and comments:
-        comments.update(ai_client.translate_report_text(comments, language))
+    # One retry: this call runs alongside the search-industry request, so a single
+    # 429/529/timeout used to hand the specialist an empty preview whose only cure
+    # was clicking "Rewrite comments" — which is the same request again.
+    for attempt in (1, 2):
+        try:
+            comments = ai_client.generate_block_comments(
+                context=context, block_keys=block_keys, language=language
+            )
+            break
+        except ai_commentary.AICommentaryUnavailable as error:
+            logger.warning("ai_block_comments_failed attempt=%s error=%s", attempt, error)
+            if attempt == 2:
+                raise HTTPException(status_code=503, detail=str(error)) from error
 
     return {"comments": comments, "model": ai_client.comment_model, "language": language}
 
@@ -880,18 +885,12 @@ def write_search_industry(
     if client is None:
         raise HTTPException(status_code=404, detail="Client not found.")
 
+    language = _client_language(client)
     try:
-        text_out = ai_client_search_industry(client, payload.period_label)
+        text_out = ai_client_search_industry(client, payload.period_label, language)
     except ai_commentary.AICommentaryUnavailable as error:
         logger.warning("ai_search_industry_failed error=%s", error)
         return {"text": "", "block_type_key": ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY}
-
-    language = _client_language(client)
-    if text_out and localization.needs_translation(language):
-        translated = get_ai_commentary_client().translate_report_text(
-            {ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY: text_out}, language
-        )
-        text_out = translated.get(ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY) or text_out
 
     return {
         "text": text_out,
@@ -900,9 +899,11 @@ def write_search_industry(
     }
 
 
-def ai_client_search_industry(client: Client, period_label: str) -> str:
+def ai_client_search_industry(
+    client: Client, period_label: str, language: str = localization.DEFAULT_LANGUAGE
+) -> str:
     return get_ai_commentary_client().write_search_industry(
-        client_domain=client.domain, period_label=period_label
+        client_domain=client.domain, period_label=period_label, language=language
     )
 
 
@@ -930,20 +931,17 @@ def write_report_summary(
         include_comments=True,
     )
     ai_client = get_ai_commentary_client()
+    # Same as the block comments: written in the report's language, not translated.
+    language = _client_language(client)
     try:
         summary = ai_client.generate_summary(
             context=context,
             existing_summary=payload.existing_summary,
             guidance=payload.summary_guidance,
+            language=language,
         )
     except ai_commentary.AICommentaryUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
-
-    # Same two-step as the block comments: written in English, then translated.
-    language = _client_language(client)
-    if localization.needs_translation(language):
-        translated = ai_client.translate_report_text({"summary": summary}, language)
-        summary = translated.get("summary") or summary
 
     return {
         "summary": summary,

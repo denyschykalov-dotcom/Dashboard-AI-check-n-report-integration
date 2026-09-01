@@ -228,10 +228,8 @@ def _resolve_channel_mix_bar(tabs: dict, windows: Windows) -> BlockResult:
     return BlockResult.ok({"period": windows.current.display, "channels": channels})
 
 
-def _resolve_top_pages(tabs: dict, windows: Windows) -> BlockResult:
-    rows = periods.window_rows(tabs.get("GA4 Top Pages", []), windows.current)
-    if not rows:
-        return BlockResult.unavailable(f"No top-pages data found for {windows.current.display}.")
+def _top_pages(tabs: dict, window: Window) -> list[dict[str, object]]:
+    rows = periods.window_rows(tabs.get("GA4 Top Pages", []), window)
     items = []
     for page, group in periods.group_by(rows, "Landing Page").items():
         items.append(
@@ -248,7 +246,27 @@ def _resolve_top_pages(tabs: dict, windows: Windows) -> BlockResult:
             }
         )
     items.sort(key=lambda item: item["sessions"], reverse=True)
-    return BlockResult.ok({"period": windows.current.display, "pages": items[:_TOP_PAGES_LIMIT]})
+    return items
+
+
+def _resolve_top_pages(tabs: dict, windows: Windows) -> BlockResult:
+    pages = _top_pages(tabs, windows.current)[:_TOP_PAGES_LIMIT]
+    if not pages:
+        return BlockResult.unavailable(f"No top-pages data found for {windows.current.display}.")
+
+    # Comparison rows are cut down to the pages the report shows, so every listed
+    # page can draw its delta without shipping the whole tail of last month.
+    wanted = {item["page"] for item in pages}
+    return BlockResult.ok(
+        {
+            "period": windows.current.display,
+            "previous_period": windows.previous.display,
+            "yoy_period": windows.yoy.display,
+            "pages": pages,
+            "pages_previous": [p for p in _top_pages(tabs, windows.previous) if p["page"] in wanted],
+            "pages_yoy": [p for p in _top_pages(tabs, windows.yoy) if p["page"] in wanted],
+        }
+    )
 
 
 def _resolve_monetization(tabs: dict, windows: Windows) -> BlockResult:

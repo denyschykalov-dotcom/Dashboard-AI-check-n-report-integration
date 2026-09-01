@@ -57,7 +57,10 @@ _MAX_CONTEXT_CHARS = 120_000
 # Per-day series: the comment talks about the period, not about individual days.
 _DROP_DATA_KEYS = frozenset({"daily", "daily_previous", "daily_yoy"})
 
-_COMMENT_MAX_TOKENS = 16000
+# Thinking shares this budget with the JSON body, and a run that thinks long
+# used to truncate the body mid-object — which surfaced as "unreadable" and cost
+# the specialist the whole draft.
+_COMMENT_MAX_TOKENS = 24000
 _SUMMARY_MAX_TOKENS = 16000
 _TRANSLATE_MAX_TOKENS = 32000
 # Several rounds of web search plus the write-up.
@@ -316,6 +319,22 @@ def _context_json(context: dict[str, object]) -> str:
     return text[:_MAX_CONTEXT_CHARS] + "\n… context truncated for length …"
 
 
+def _language_line(language: str) -> str:
+    """Ask for the report's own language up front.
+
+    Written prose used to be produced in English and translated in a second
+    request, which left English text behind on every batch the translator
+    dropped. Writing it in the target language in the first place removes both
+    the extra call and that silent half-English failure.
+    """
+    if not localization.needs_translation(language):
+        return ""
+    return (
+        f"\n\nWrite the text in {localization.language_name(language)}. "
+        "Leave metric names, brand names, URLs and numbers as they are."
+    )
+
+
 def commentable_block_keys(blocks: list[dict[str, object]]) -> list[str]:
     """The sections that get a generated comment.
 
@@ -431,6 +450,7 @@ class AICommentaryClient:
         *,
         context: dict[str, object],
         block_keys: list[str],
+        language: str = localization.DEFAULT_LANGUAGE,
     ) -> dict[str, str]:
         """One draft comment per requested section, keyed by block key."""
         if not block_keys:
@@ -447,6 +467,7 @@ class AICommentaryClient:
             f"{request_lines}\n\n"
             "Full report (JSON):\n"
             f"{_context_json(context)}"
+            f"{_language_line(language)}"
         )
 
         message = self._create(
@@ -490,6 +511,7 @@ class AICommentaryClient:
         *,
         client_domain: str,
         period_label: str,
+        language: str = localization.DEFAULT_LANGUAGE,
     ) -> str:
         """The month's Google-search-landscape scene-setter, researched on the web.
 
@@ -515,6 +537,7 @@ class AICommentaryClient:
             f"and volatility that were noticed in {period}.\n\n"
             f"Search the web first, and confirm each item really falls in {period}. "
             f"Keep the result under {_SEARCH_INDUSTRY_MAX_WORDS} words."
+            f"{_language_line(language)}"
         )
 
         messages: list[dict[str, typing.Any]] = [{"role": "user", "content": user_text}]
@@ -568,6 +591,7 @@ class AICommentaryClient:
         context: dict[str, object],
         existing_summary: str = "",
         guidance: str = "",
+        language: str = localization.DEFAULT_LANGUAGE,
     ) -> str:
         """The report-wide executive summary, capped at the configured length.
 
@@ -598,6 +622,7 @@ class AICommentaryClient:
             f"{guidance_block}"
             "Full report, including the specialist's edited comments (JSON):\n"
             f"{_context_json(context)}"
+            f"{_language_line(language)}"
         )
 
         message = self._create(
@@ -693,22 +718,6 @@ class AICommentaryClient:
         """``localization.ensure_ui_translations`` hook — same call, named for intent."""
         return self.translate_strings(texts, language)
 
-    def translate_report_text(
-        self, texts: dict[str, str], language: str
-    ) -> dict[str, str]:
-        """Translate a report's prose, keyed the same way it came in.
-
-        ``texts`` maps an arbitrary key (a block key, or ``summary``) to English
-        prose; the result maps those same keys to the translated prose. Anything
-        Claude declined or dropped is simply absent, so callers keep the English.
-        """
-        pending = {key: value for key, value in texts.items() if value and value.strip()}
-        if not pending or not localization.needs_translation(language):
-            return {}
-        translated = self.translate_strings(list(pending.values()), language)
-        return {
-            key: translated[value] for key, value in pending.items() if value in translated
-        }
 
     # -- transport -------------------------------------------------------------
 

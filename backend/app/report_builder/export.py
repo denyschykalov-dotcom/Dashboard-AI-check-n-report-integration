@@ -345,12 +345,18 @@ def _build_data(
 
     # -- GA4 top pages (b6) --
     if "ga4_top_pages" in ok and cur_k:
-        data["ga4TopPages"] = {cur_k: [
-            {"page": p.get("page", ""), "sessions": _num(p.get("sessions")),
-             "engaged": _num(p.get("engaged_sessions")), "keyEvents": _num(p.get("key_events")),
-             "bounce": _num(p.get("bounce_rate"))}
-            for p in ok["ga4_top_pages"].get("pages", [])
-        ]}
+        d = ok["ga4_top_pages"]
+        data["ga4TopPages"] = {}
+        for pk, sub in (("cur", "pages"), ("prev", "pages_previous"), ("yoy", "pages_yoy")):
+            k = P.get(pk)
+            if not k:
+                continue
+            data["ga4TopPages"][k] = [
+                {"page": p.get("page", ""), "sessions": _num(p.get("sessions")),
+                 "engaged": _num(p.get("engaged_sessions")), "keyEvents": _num(p.get("key_events")),
+                 "bounce": _num(p.get("bounce_rate"))}
+                for p in d.get(sub, [])
+            ]
 
     # -- GA4 monetization (b7) --
     if "ga4_monetization" in ok:
@@ -425,18 +431,28 @@ def _build_data(
     # -- GSC queries/pages (b10) --
     if "gsc_top_queries" in ok and cur_k:
         d = ok["gsc_top_queries"]
-        data["gscQueries"] = {cur_k: [
-            {"query": q.get("query", ""), "clicks": _num(q.get("clicks")),
-             "impressions": _num(q.get("impressions")), "ctr": _num(q.get("ctr")),
-             "position": _num(q.get("avg_position"))}
-            for q in d.get("queries", [])
-        ]}
-        data["gscTopPages"] = {cur_k: [
-            {"page": p.get("page", ""), "clicks": _num(p.get("clicks")),
-             "impressions": _num(p.get("impressions")), "ctr": _num(p.get("ctr")),
-             "position": _num(p.get("avg_position"))}
-            for p in d.get("pages", [])
-        ]}
+
+        def _gsc_items(rows, label_key):
+            return [
+                {label_key: r.get(label_key, ""), "clicks": _num(r.get("clicks")),
+                 "impressions": _num(r.get("impressions")), "ctr": _num(r.get("ctr")),
+                 "position": _num(r.get("avg_position"))}
+                for r in (rows or [])
+            ]
+
+        # cur + prev/yoy, so the tables can show which query/page went up or down.
+        data["gscQueries"] = {}
+        data["gscTopPages"] = {}
+        for pk, q_key, p_key in (
+            ("cur", "queries", "pages"),
+            ("prev", "queries_previous", "pages_previous"),
+            ("yoy", "queries_yoy", "pages_yoy"),
+        ):
+            k = P.get(pk)
+            if not k:
+                continue
+            data["gscQueries"][k] = _gsc_items(d.get(q_key), "query")
+            data["gscTopPages"][k] = _gsc_items(d.get(p_key), "page")
 
     # -- Ahrefs (b3) --
     if "ahrefs_domain_analysis" in ok:

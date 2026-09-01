@@ -770,10 +770,19 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
       // Section commentary: fills into the preview already on screen.
       setAiStage("comments");
       try {
-        nextComments = { ...nextComments, ...(await draftComments(response)) };
+        const drafted = await draftComments(response);
+        nextComments = { ...nextComments, ...drafted };
         setComments(nextComments);
         await refreshPreview(withComments(response.blocks, nextComments), response, custom);
-        setStatus("Claude drafted the section comments — review and edit them in the preview.");
+        // An empty draft is a 200 too — say so instead of claiming comments were
+        // written, which sent specialists hunting for note boxes that never filled.
+        if (Object.keys(drafted).length === 0) {
+          setAiNotice(
+            "Claude wrote no section comments for this report — use “Rewrite comments” to try again.",
+          );
+        } else {
+          setStatus("Claude drafted the section comments — review and edit them in the preview.");
+        }
       } catch (aiError) {
         setAiNotice(
           `Claude could not draft the comments (${
