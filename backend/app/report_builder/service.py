@@ -70,7 +70,7 @@ def create_client(
     report_language: typing.Optional[str] = None,
 ) -> Client:
     cleaned_name = (name or "").strip()
-    cleaned_domain = (domain or "").strip()
+    cleaned_domain = clean_domain(domain)
     if not cleaned_name:
         raise ValueError("Client name is required.")
     if not cleaned_domain:
@@ -126,6 +126,28 @@ def update_client_settings(
     session.commit()
     session.refresh(client)
     return client
+
+
+def clean_domain(value: str) -> str:
+    """A pasted address as the bare host the report can build links from.
+
+    People paste the address bar. Ahrefs tolerates a full URL (checked: every
+    spelling of eatlebab.com returns identical metrics), but the report builds
+    each clickable page link as ``"https://" + domain``, so "https://acme.com"
+    rendered "https://https://acme.com/page" — a dead link in a document a
+    client reads. It also stops the top-movers URLs being shortened to paths.
+
+    ``www`` is deliberately kept: it is part of the host that serves the site,
+    and the link has to reach it.
+    """
+    text = (value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", text)  # scheme
+    text = re.split(r"[/?#]", text, maxsplit=1)[0]  # path, query, fragment
+    # A trailing dot is a valid FQDN root but breaks string comparison against
+    # the sheet titles and page URLs this is matched against.
+    return text.strip().strip(".").lower()
 
 
 def _extract_sheet_id(value: str) -> str:

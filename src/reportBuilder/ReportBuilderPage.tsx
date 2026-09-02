@@ -1219,8 +1219,11 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       window.open(url, "_blank", "noopener");
-      // give the new tab time to load before revoking
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      // Not revoked on a timer any more: the blob: URL was dying after 60
+      // seconds, so reloading the preview tab — or coming back to it later —
+      // showed an error page. The browser frees these when this dashboard tab is
+      // discarded, which is the right lifetime for a throwaway preview. For a
+      // URL that outlives the tab, and that a client can open, use Share link.
     } catch (previewError) {
       setError(previewError instanceof Error ? previewError.message : "Failed to preview report.");
     }

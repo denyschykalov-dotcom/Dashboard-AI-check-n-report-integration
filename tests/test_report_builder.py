@@ -1,4 +1,5 @@
 import os
+import pathlib
 import time
 import unittest
 import uuid
@@ -2673,6 +2674,68 @@ class AiRevenueWithoutMonetizationTests(unittest.TestCase):
         }
         ai_ecom = self._ai_ecom([monetization, self._ai_traffic_block()])
         self.assertEqual(ai_ecom["2026-06"]["purchases"], 7)
+
+
+class ClientDomainCleaningTests(unittest.TestCase):
+    """A pasted address becomes the bare host the report builds links from."""
+
+    def setUp(self) -> None:
+        self.session = _make_session()
+
+    def test_a_pasted_url_becomes_a_bare_host(self) -> None:
+        for typed, expected in (
+            ("eatlebab.com", "eatlebab.com"),
+            ("www.eatlebab.com", "www.eatlebab.com"),      # www is part of the host
+            ("https://eatlebab.com", "eatlebab.com"),
+            ("http://eatlebab.com/", "eatlebab.com"),
+            ("https://www.eatlebab.com/venue-menus", "www.eatlebab.com"),
+            ("eatlebab.com/", "eatlebab.com"),
+            ("eatlebab.com?utm_source=x", "eatlebab.com"),
+            ("eatlebab.com#top", "eatlebab.com"),
+            ("  EatLebab.COM  ", "eatlebab.com"),
+            ("eatlebab.com.", "eatlebab.com"),
+            ("", ""),
+        ):
+            self.assertEqual(report_service.clean_domain(typed), expected, typed)
+
+    def test_create_client_stores_the_cleaned_domain(self) -> None:
+        client = report_service.create_client(
+            self.session,
+            name="eatlebab",
+            domain="https://www.eatlebab.com/venue-menus",
+            created_by=uuid.uuid4(),
+        )
+        self.assertEqual(client.domain, "www.eatlebab.com")
+
+    def test_a_url_with_no_host_is_still_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            report_service.create_client(
+                self.session, name="Acme", domain="https://", created_by=uuid.uuid4()
+            )
+
+    def test_the_cleaned_domain_builds_a_working_report_link(self) -> None:
+        """The bug this exists for: "https://" + domain in the report template."""
+        cleaned = report_service.clean_domain("https://eatlebab.com")
+        self.assertEqual(f"https://{cleaned}/kebab-queen", "https://eatlebab.com/kebab-queen")
+        # …and the top-movers URL shortens to a path again.
+        self.assertEqual(
+            report_export._url_path("https://www.eatlebab.com/kebab-queen", cleaned),
+            "/kebab-queen",
+        )
+
+    def test_the_migration_sql_agrees_with_clean_domain(self) -> None:
+        """Existing rows are cleaned by SQL, new ones by Python — same answer.
+
+        Run against SQLite here, which has no regexp_replace, so the SQL's steps
+        are applied as the equivalent Python. This guards the *steps* drifting
+        apart, which is what would leave old rows broken after a deploy.
+        """
+        sql = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "backend/app/migrations/sql/020_normalize_client_domains.sql"
+        ).read_text(encoding="utf-8")
+        for fragment in ("^[A-Za-z][A-Za-z0-9+.-]*://", "[/?#].*$", "btrim", "lower"):
+            self.assertIn(fragment, sql)
 
 
 class AhrefsRetryTests(unittest.TestCase):
