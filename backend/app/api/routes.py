@@ -671,7 +671,6 @@ def update_report_client_settings(
             se_ranking_target=payload.se_ranking_target,
             ai_visibility_project=payload.ai_visibility_project,
             ga4_sheet_id=payload.ga4_sheet_id,
-            report_currency=payload.report_currency,
         )
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -811,7 +810,6 @@ def preview_report(
         customization=payload.customization,
         editable=True,
         language=_client_language(client),
-        currency=client.report_currency,
     )
     return Response(content=document, media_type="text/html")
 
@@ -892,7 +890,14 @@ def write_search_industry(
         text_out = ai_client_search_industry(client, payload.period_label, language)
     except ai_commentary.AICommentaryUnavailable as error:
         logger.warning("ai_search_industry_failed error=%s", error)
-        return {"text": "", "block_type_key": ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY}
+        # Still a 200 with empty text — the specialist writes the section
+        # themselves. The reason rides along so the dashboard can say why the
+        # section came back blank instead of leaving it a mystery.
+        return {
+            "text": "",
+            "reason": str(error),
+            "block_type_key": ai_commentary.SEARCH_INDUSTRY_BLOCK_KEY,
+        }
 
     return {
         "text": text_out,
@@ -1042,7 +1047,6 @@ def export_report(
     client_domain = client.domain if client else ""
     # An export is the client-facing artifact, so it is rendered in their language.
     language = _client_language(client) if client else localization.DEFAULT_LANGUAGE
-    currency = (client.report_currency if client else None) or localization.DEFAULT_CURRENCY
     safe_name = "".join(ch if ch.isalnum() else "-" for ch in client_name).strip("-") or "client"
     filename_base = f"{safe_name}-{report.period_label}-report"
 
@@ -1053,7 +1057,6 @@ def export_report(
             client_name=client_name,
             client_domain=client_domain,
             language=language,
-            currency=currency,
         )
         return Response(
             content=document,
@@ -1069,7 +1072,6 @@ def export_report(
                 client_name=client_name,
                 client_domain=client_domain,
                 language=language,
-                currency=currency,
             )
         except report_export.PdfRenderError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
@@ -1085,7 +1087,6 @@ def export_report(
         client_name=client_name,
         client_domain=client_domain,
         language=language,
-        currency=currency,
     )
     return Response(
         content=document,

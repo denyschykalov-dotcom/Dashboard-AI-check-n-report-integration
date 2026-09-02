@@ -451,9 +451,9 @@ const LBL = DATA.meta.LBL;
 // the report opens on.
 const MODES = (DATA.meta.modes && DATA.meta.modes.length) ? DATA.meta.modes : [{id:'mom', label:''}];
 const state = {mode: MODES[0].id};
-// Currency the revenue figures are printed in — a per-client setting, because
-// GA4 reports revenue in its property's own currency.
-const CUR = DATA.meta.currency || '₴';
+// Currency the revenue figures are printed in, read from the client sheet's
+// Currency column because GA4 reports revenue in its property's own currency.
+const CUR = DATA.meta.currency || '$';
 const money = n => fnum(n)+' '+CUR, moneyAbbr = n => fabbr(n)+' '+CUR;
 const cmp = ()=> state.mode==='mom' ? P.prev : P.yoy;
 

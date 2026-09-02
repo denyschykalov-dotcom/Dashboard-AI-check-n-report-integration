@@ -523,8 +523,9 @@ class AICommentaryClient:
         without it the model would confabulate algorithm updates into a report a
         client reads as fact.
 
-        Returns "" when nothing reliable was found, which the caller surfaces as
-        an empty editable section rather than as an error.
+        Raises :class:`AICommentaryUnavailable` when there is nothing usable to
+        return — the caller turns that into an empty editable section plus the
+        reason, rather than into a failed request.
         """
         client = self._api()
         period = (period_label or "").strip() or "the reporting month"
@@ -575,13 +576,26 @@ class AICommentaryClient:
             "ai_search_industry model=%s period=%s searches=%s words=%s",
             self.summary_model, period, searches, len(text.split()),
         )
+        # Both empty outcomes below used to return "", which reached the report as
+        # a blank section with nothing said about it — indistinguishable from a
+        # section nobody filled in. They name themselves now; the caller still
+        # fails soft, it just says which of the two happened.
         if searches == 0 and text:
             # The model answered from memory. For a month past its cutoff that is
             # exactly the failure mode this call exists to avoid.
             logger.warning(
                 "ai_search_industry_unsourced period=%s — discarding unsourced text", period
             )
-            return ""
+            raise AICommentaryUnavailable(
+                f"Claude wrote the {period} search-industry section without searching the "
+                "web, so it was discarded as unsourced. Check that web search is enabled "
+                "for this Anthropic organization."
+            )
+        if not text:
+            raise AICommentaryUnavailable(
+                f"Claude ran {searches} web search(es) for {period} and found nothing "
+                "reliable to report."
+            )
         return text
 
     # -- summary ---------------------------------------------------------------

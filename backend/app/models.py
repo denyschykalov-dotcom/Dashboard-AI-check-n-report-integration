@@ -133,13 +133,6 @@ class Client(Base):
     report_language: Mapped[str] = mapped_column(
         Text, nullable=False, default="en", server_default="en"
     )
-    # Symbol the report prints next to revenue figures. GA4 reports revenue in
-    # the property's own currency and the sheet does not carry it, so it is set
-    # per client here. Defaults to ₴, which is what the template hardcoded
-    # before this column existed.
-    report_currency: Mapped[str] = mapped_column(
-        Text, nullable=False, default="₴", server_default="₴"
-    )
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow

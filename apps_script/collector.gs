@@ -390,7 +390,12 @@ function ga4Ecommerce(start, end, channelGroup) {
   const r = ga4Report(body);
   const v = r.rows && r.rows[0] ? r.rows[0].metricValues : [];
   const at = i => Number((v[i] && v[i].value) || 0);
-  return { purchases: at(0), revenue: at(1), addToCarts: at(2), checkouts: at(3) };
+  // purchaseRevenue is denominated in the property's own currency, and nothing
+  // else in the sheet records which one that is — so the report would guess.
+  // Every runReport response carries it in its metadata; write it alongside the
+  // revenue so the backend can read it instead.
+  const currency = (r.metadata && r.metadata.currencyCode) || '';
+  return { purchases: at(0), revenue: at(1), addToCarts: at(2), checkouts: at(3), currency: currency };
 }
 
 function ga4TopPages(start, end) {
@@ -680,10 +685,10 @@ function collectSite_(site) {
   // All three tabs are read by the backend's monetization block. Organic and AI
   // were never written by v5, which is why those columns rendered empty.
   if (F.ECOMMERCE) {
-    const ecommerceHeader = ['Period', 'Purchases', 'Revenue', 'Add to Carts', 'Checkouts'];
+    const ecommerceHeader = ['Period', 'Purchases', 'Revenue', 'Currency', 'Add to Carts', 'Checkouts'];
     const ecommerceRows = channelGroup => perPeriod_(periods, keys, p => {
       const e = ga4Ecommerce(p.start, p.end, channelGroup);
-      return [[e.purchases, e.revenue, e.addToCarts, e.checkouts]];
+      return [[e.purchases, e.revenue, e.currency, e.addToCarts, e.checkouts]];
     });
     writeTab_(ss, 'GA4 Ecommerce',         ecommerceHeader, ecommerceRows(null));
     writeTab_(ss, 'GA4 Ecommerce Organic', ecommerceHeader, ecommerceRows('Organic Search'));

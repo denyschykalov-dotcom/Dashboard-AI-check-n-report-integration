@@ -222,7 +222,6 @@ def _build_data(
     customization: typing.Optional[dict] = None,
     editable: bool = False,
     language: str = localization.DEFAULT_LANGUAGE,
-    currency: str = localization.DEFAULT_CURRENCY,
 ) -> dict:
     ok = {b["block_type_key"]: (b.get("data") or {}) for b in blocks if b.get("status") == "ok"}
     data: dict[str, typing.Any] = {}
@@ -285,9 +284,18 @@ def _build_data(
         "periodLong": _period(_long(cur_label)),
         "nextPeriodLong": _period(_next_long(cur_label)),
         "prepared": prepared,
-        # Symbol the revenue figures are printed with — GA4 reports revenue in
-        # the analytics property's currency, so it is a per-client setting.
-        "currency": currency or localization.DEFAULT_CURRENCY,
+        # Symbol the revenue figures are printed with, read from the Currency
+        # column of the client sheet's ecommerce tabs by whichever GA4 block
+        # resolved. A sheet without that column falls back to US dollars.
+        "currency": next(
+            (
+                c
+                for c in ((ok.get(key) or {}).get("currency") for key in
+                          ("ga4_monetization", "ga4_ai_traffic"))
+                if c
+            ),
+            localization.DEFAULT_CURRENCY,
+        ),
         "cur": cur_k, "prev": prev_k, "yoy": yoy_k,
         "P": P, "LBL": lbl,
         # The comparison toggles the report offers, and which one it opens on.
@@ -806,7 +814,6 @@ def build_report_html(
     client_domain: str,
     customization: typing.Optional[dict] = None,
     language: str = localization.DEFAULT_LANGUAGE,
-    currency: str = localization.DEFAULT_CURRENCY,
 ) -> str:
     prepared = (report.updated_at or report.created_at or datetime.utcnow()).date().isoformat()
     return _render_document(
@@ -818,7 +825,6 @@ def build_report_html(
         client_domain=client_domain,
         customization=customization if customization is not None else _load_json(report.customization),
         language=language,
-        currency=currency,
     )
 
 
@@ -832,7 +838,6 @@ def build_preview_html(
     customization: typing.Optional[dict] = None,
     editable: bool = False,
     language: str = localization.DEFAULT_LANGUAGE,
-    currency: str = localization.DEFAULT_CURRENCY,
 ) -> str:
     """Render a report from unsaved block payloads (the generate response shape)
     for the in-dashboard live preview. With ``editable`` the report carries the
@@ -847,7 +852,6 @@ def build_preview_html(
         customization=customization,
         editable=editable,
         language=language,
-        currency=currency,
     )
 
 
@@ -885,7 +889,6 @@ def build_report_pdf(
     client_domain: str,
     customization: typing.Optional[dict] = None,
     language: str = localization.DEFAULT_LANGUAGE,
-    currency: str = localization.DEFAULT_CURRENCY,
 ) -> bytes:
     """Render the same document as :func:`build_report_html`, then print it to
     PDF with headless Chrome — the report is JS-rendered (charts, tabs, KPI
@@ -899,7 +902,6 @@ def build_report_pdf(
         client_domain=client_domain,
         customization=customization,
         language=language,
-        currency=currency,
     )
     chrome = _find_chrome_binary()
 
@@ -1226,7 +1228,6 @@ def build_report_markdown(
     client_domain: str,
     customization: typing.Optional[dict] = None,
     language: str = localization.DEFAULT_LANGUAGE,
-    currency: str = localization.DEFAULT_CURRENCY,
 ) -> str:
     """A Markdown rendering of the report's data and comments — same section
     selection/availability rules as the HTML/PDF export (an unselected or
@@ -1242,7 +1243,6 @@ def build_report_markdown(
         customization=customization if customization is not None else _load_json(report.customization),
         editable=False,
         language=language,
-        currency=currency,
     )
     # Markdown has no template JS to run the post-render pass, so its section
     # titles are localized here.
@@ -1288,7 +1288,6 @@ def _render_document(
     customization: typing.Optional[dict],
     editable: bool = False,
     language: str = localization.DEFAULT_LANGUAGE,
-    currency: str = localization.DEFAULT_CURRENCY,
 ) -> str:
     data = _build_data(
         period_label=period_label,
@@ -1300,7 +1299,6 @@ def _render_document(
         customization=customization,
         editable=editable,
         language=language,
-        currency=currency,
     )
 
     data_json = json.dumps(data, ensure_ascii=False)

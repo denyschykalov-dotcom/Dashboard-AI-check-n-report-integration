@@ -38,11 +38,32 @@ logger = logging.getLogger("rankberry.report_builder.i18n")
 
 DEFAULT_LANGUAGE = "en"
 
-# Symbol printed next to revenue figures when a client has none set. It is not
-# derived from the language — GA4 reports revenue in the analytics property's
-# currency, which is a per-client fact — so it lives here only because this is
-# the module both the client service and the exporter already import.
-DEFAULT_CURRENCY = "₴"
+# Symbol printed next to revenue figures when the client's sheet carries no
+# Currency column. Not derived from the language — GA4 reports revenue in the
+# analytics property's own currency, which is a per-client fact read from the
+# sheet. It lives here because this is the module the exporter already imports.
+DEFAULT_CURRENCY = "$"
+
+# Currency cells arrive as an ISO code ("USD"), a symbol ("$"), or occasionally a
+# code with the symbol already attached. Anything unrecognized is passed through
+# as typed — a sheet holding "zł" should print "zł", not fall back to dollars.
+_CURRENCY_SYMBOLS = {
+    "USD": "$", "EUR": "€", "GBP": "£", "UAH": "₴", "PLN": "zł",
+    "CAD": "C$", "AUD": "A$", "CHF": "CHF", "JPY": "¥", "INR": "₹",
+    "SEK": "kr", "NOK": "kr", "DKK": "kr", "CZK": "Kč", "TRY": "₺",
+}
+
+
+def currency_symbol(value: typing.Optional[str]) -> str:
+    """A sheet's Currency cell as the symbol the report prints.
+
+    Empty or missing means the sheet does not carry one, which is the common case
+    for older collector runs — those get :data:`DEFAULT_CURRENCY`.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return DEFAULT_CURRENCY
+    return _CURRENCY_SYMBOLS.get(text.upper(), text)
 
 # Languages a report can be delivered in. English is the language reports are
 # authored in, so it needs no translation pass.

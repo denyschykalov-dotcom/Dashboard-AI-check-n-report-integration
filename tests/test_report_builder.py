@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from backend.app.db import Base, build_engine
 from backend.app.models import Client, Report, ReportBlock, Run, RunResult
 from backend.app.report_builder import export as report_export
+from backend.app.report_builder import localization
 from backend.app.report_builder import secrets_crypto
 from backend.app.report_builder import selections_service
 from backend.app.report_builder import service as report_service
@@ -270,10 +271,10 @@ def _ga4_sheet_fixture() -> dict[str, list[list[str]]]:
             ["Jun 2026", "/new", "25185", "23762", "22670", "5.7"],
         ],
         "GA4 Ecommerce": [
-            ["Period", "Purchases", "Revenue", "Add to Carts", "Checkouts"],
-            ["Jun 2026", "6058", "22724460.05", "36610", "18268"],
-            ["May 2026", "8789", "29735694.35", "53226", "23902"],
-            ["Jun 2025", "4269", "11646456.71", "28324", "13994"],
+            ["Period", "Purchases", "Revenue", "Currency", "Add to Carts", "Checkouts"],
+            ["Jun 2026", "6058", "22724460.05", "UAH", "36610", "18268"],
+            ["May 2026", "8789", "29735694.35", "UAH", "53226", "23902"],
+            ["Jun 2025", "4269", "11646456.71", "UAH", "28324", "13994"],
         ],
         "GA4 Ecommerce Organic": [
             ["Period", "Purchases", "Revenue", "Add to Carts", "Checkouts", "Channel"],
@@ -445,6 +446,21 @@ class GA4SheetResolverTests(unittest.TestCase):
         self.assertAlmostEqual(result.data["ai"]["current"]["revenue"], 185000.50)
         self.assertEqual(result.data["ai"]["previous"]["purchases"], 31)
         self.assertEqual(result.data["ai"]["yoy"]["purchases"], 5)
+
+    def test_monetization_reads_the_currency_off_the_sheet(self) -> None:
+        with _patched_ga4_sheet():
+            result = ga4.resolve(get_block("ga4_monetization"), self._context())
+        self.assertEqual(result.data["currency"], "₴")
+
+    def test_monetization_currency_defaults_to_dollars_without_the_column(self) -> None:
+        fixture = _ga4_sheet_fixture()
+        for tab in ("GA4 Ecommerce", "GA4 Ecommerce Organic", "GA4 AI Ecommerce"):
+            header, *rows = fixture[tab]
+            keep = [i for i, name in enumerate(header) if name != "Currency"]
+            fixture[tab] = [[row[i] for i in keep] for row in ([header] + rows)]
+        with _patched_ga4_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = ga4.resolve(get_block("ga4_monetization"), self._context())
+        self.assertEqual(result.data["currency"], "$")
 
     def test_monetization_ai_section_empty_when_tab_absent(self) -> None:
         fixture = _ga4_sheet_fixture()
@@ -2432,45 +2448,68 @@ class ReportCacheTests(unittest.TestCase):
 
 
 class RevenueCurrencyTests(unittest.TestCase):
-    """Revenue figures are printed in the client's currency, not a hardcoded ₴."""
+    """Revenue is printed in the sheet's currency, not a hardcoded ₴."""
 
-    def setUp(self) -> None:
-        self.session = _make_session()
-
-    def _data(self, **kwargs):
+    def _data(self, blocks):
         import json as _json
         import re as _re
 
         doc = report_export.build_preview_html(
             period_label="Jun 2026",
             default_comparison="mom",
-            blocks=[{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""}],
+            blocks=blocks,
             client_name="Acme Co",
             client_domain="acme.com",
-            **kwargs,
         )
         raw = _re.search(r"window\.DATA=(\{.*?\});</script>", doc, _re.DOTALL).group(1)
         raw = raw.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
         return _json.loads(raw)
 
-    def test_currency_reaches_the_template(self) -> None:
-        self.assertEqual(self._data(currency="$")["meta"]["currency"], "$")
+    def _monetization(self, **data):
+        return {
+            "block_type_key": "ga4_monetization",
+            "status": "ok",
+            "comment": "",
+            "data": {"period": "Jun 2026", "previous_period": "May 2026", **data},
+        }
 
-    def test_currency_defaults_to_the_hryvnia_the_template_used_to_hardcode(self) -> None:
-        self.assertEqual(self._data()["meta"]["currency"], "₴")
+    def test_symbol_lookup_maps_codes_and_passes_through_symbols(self) -> None:
+        self.assertEqual(localization.currency_symbol("USD"), "$")
+        self.assertEqual(localization.currency_symbol("uah"), "₴")
+        self.assertEqual(localization.currency_symbol("€"), "€")
+        # Not in the table — a sheet that typed "zł" should print "zł".
+        self.assertEqual(localization.currency_symbol("zł"), "zł")
 
-    def test_a_clients_currency_round_trips_through_settings(self) -> None:
-        client = _client(self.session, name="PartsVu", domain="partsvu.com")
-        self.assertEqual(report_service.serialize_client(client)["report_currency"], "₴")
-        updated = report_service.update_client_settings(
-            self.session, client_id=client.id, report_currency="$"
-        )
-        self.assertEqual(report_service.serialize_client(updated)["report_currency"], "$")
-        # Cleared back to the default rather than left blank.
-        cleared = report_service.update_client_settings(
-            self.session, client_id=client.id, report_currency="  "
-        )
-        self.assertEqual(cleared.report_currency, "₴")
+    def test_sheet_currency_reaches_the_template(self) -> None:
+        data = self._data([self._monetization(currency="$")])
+        self.assertEqual(data["meta"]["currency"], "$")
+
+    def test_currency_column_is_read_off_the_ecommerce_tabs(self) -> None:
+        rows = [{"Period": "Jun 2026", "Revenue": "100", "Currency": "EUR"}]
+        self.assertEqual(ga4._currency_of(rows), "€")
+        # Blank cells and older sheets without the column fall through.
+        self.assertEqual(ga4._currency_of([{"Period": "Jun 2026", "Currency": " "}]), "$")
+        self.assertEqual(ga4._currency_of([]), "$")
+
+    def test_a_sheet_without_the_column_falls_back_to_us_dollars(self) -> None:
+        data = self._data([{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""}])
+        self.assertEqual(data["meta"]["currency"], "$")
+
+    def test_the_ai_traffic_block_supplies_the_currency_on_its_own(self) -> None:
+        block = {
+            "block_type_key": "ga4_ai_traffic",
+            "status": "ok",
+            "comment": "",
+            "data": {
+                "period": "Jun 2026",
+                "previous_period": "May 2026",
+                "currency": "₴",
+                "summary": {"current": {"total_ai_sessions": 5, "engaged_sessions": 4, "engagement_rate": 80}},
+                "tools": [],
+                "top_pages": [],
+            },
+        }
+        self.assertEqual(self._data([block])["meta"]["currency"], "₴")
 
 
 class AiRevenueWithoutMonetizationTests(unittest.TestCase):

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import typing
 
+from backend.app.report_builder import localization
 from backend.app.report_builder.block_catalog import BlockType
 from backend.app.report_builder.data_sources import periods
 from backend.app.report_builder.data_sources.base import BlockResult, ResolveContext
@@ -134,6 +135,22 @@ def _ecommerce_kpi(rows: list[dict[str, str]]) -> typing.Optional[dict[str, obje
         "add_to_carts": periods.sum_int(rows, "Add to Carts"),
         "checkouts": periods.sum_int(rows, "Checkouts"),
     }
+
+
+def _currency_of(*row_groups: list[dict[str, str]]) -> str:
+    """The currency the revenue figures are in, read from the sheet.
+
+    The ecommerce tabs carry a "Currency" cell alongside Revenue. It is the only
+    place the currency exists — GA4 reports purchaseRevenue in the analytics
+    property's own currency and nothing else in the sheet records which that is.
+    The tabs are checked in the order given and the first filled cell wins;
+    sheets written before the column existed fall back to US dollars.
+    """
+    for rows in row_groups:
+        for row in rows:
+            if str(row.get("Currency") or "").strip():
+                return localization.currency_symbol(row.get("Currency"))
+    return localization.DEFAULT_CURRENCY
 
 
 def _ai_summary_kpi(rows: list[dict[str, str]]) -> typing.Optional[dict[str, object]]:
@@ -281,6 +298,7 @@ def _resolve_monetization(tabs: dict, windows: Windows) -> BlockResult:
             "period": windows.current.display,
             "previous_period": windows.previous.display,
             "yoy_period": windows.yoy.display,
+            "currency": _currency_of(site_rows, organic_rows, ai_rows),
             "site_wide": {
                 "current": _ecommerce_kpi(periods.window_rows(site_rows, windows.current)),
                 "previous": _ecommerce_kpi(periods.window_rows(site_rows, windows.previous)),
@@ -360,6 +378,7 @@ def _resolve_ai_traffic(tabs: dict, windows: Windows) -> BlockResult:
             },
             "tools": tools,
             "top_pages": top_pages,
+            "currency": _currency_of(ai_ecommerce_rows),
             # Sales made by AI-referred visitors. Carried here as well as in the
             # monetization block, because the AI-Traffic section shows them and a
             # report can select this block without that one.

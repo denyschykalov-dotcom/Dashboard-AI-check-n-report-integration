@@ -23,15 +23,6 @@ export const REPORT_LANGUAGES: { value: ReportLanguage; label: string }[] = [
   { value: "uk", label: "Ukrainian" },
 ];
 
-/** Symbols offered for a client's revenue figures. GA4 reports revenue in its
- *  property's own currency, which the collector sheet does not carry. */
-export const REPORT_CURRENCIES: { value: string; label: string }[] = [
-  { value: "₴", label: "₴ — Ukrainian hryvnia" },
-  { value: "$", label: "$ — US dollar" },
-  { value: "€", label: "€ — Euro" },
-  { value: "£", label: "£ — Pound sterling" },
-];
-
 export type Client = {
   id: string;
   name: string;
@@ -43,8 +34,6 @@ export type Client = {
   /** AI-check project the AI-visibility blocks read from; null matches on name. */
   ai_visibility_project: string | null;
   report_language: ReportLanguage;
-  /** Symbol printed next to revenue figures in the report. */
-  report_currency: string;
   created_at: string;
 };
 
@@ -134,6 +123,8 @@ export type AiCommentsResponse = {
 /** The month's search-landscape intro, researched with web search (~90s). */
 export type AiSearchIndustryResponse = {
   text: string;
+  /** Why `text` is empty — web search unavailable, nothing found, unsourced draft. */
+  reason?: string;
   block_type_key: string;
   language?: ReportLanguage;
 };

@@ -104,7 +104,6 @@ def update_client_settings(
     se_ranking_target: typing.Optional[str] = None,
     ai_visibility_project: typing.Optional[str] = None,
     ga4_sheet_id: typing.Optional[str] = None,
-    report_currency: typing.Optional[str] = None,
 ) -> Client:
     """Set the per-client links this client's data sources need.
 
@@ -123,8 +122,6 @@ def update_client_settings(
         # onto the client — fine when the folder holds one sheet per client,
         # wrong when it holds a live one and an abandoned one.
         client.ga4_sheet_id = _extract_sheet_id(ga4_sheet_id) or None
-    if report_currency is not None:
-        client.report_currency = report_currency.strip() or localization.DEFAULT_CURRENCY
     session.commit()
     session.refresh(client)
     return client
@@ -581,7 +578,6 @@ def serialize_client(client: Client) -> dict[str, object]:
         "se_ranking_target": client.se_ranking_target,
         "ai_visibility_project": client.ai_visibility_project,
         "report_language": localization.normalize_language(client.report_language),
-        "report_currency": client.report_currency or localization.DEFAULT_CURRENCY,
         "created_at": client.created_at,
     }
 

@@ -88,8 +88,6 @@ class ClientSettingsRequest(BaseModel):
     ai_visibility_project: typing.Optional[str] = Field(default=None, max_length=200)
     # A bare sheet id or a pasted Google Sheets URL; empty restores auto-lookup.
     ga4_sheet_id: typing.Optional[str] = Field(default=None, max_length=300)
-    # Symbol printed next to revenue figures; empty restores the ₴ default.
-    report_currency: typing.Optional[str] = Field(default=None, max_length=8)
 
 
 class GenerateReportRequest(BaseModel):

@@ -213,6 +213,40 @@ class SearchIndustryTextTests(unittest.TestCase):
         )
         self.assertEqual(AICommentaryClient._answer_text_of(message), "Just the answer.")
 
+    def _write(self, content):
+        api = _stub_api([types.SimpleNamespace(content=content, stop_reason="end_turn")])
+        return _client(api).write_search_industry(
+            client_domain="acme.com", period_label="Aug 2026"
+        )
+
+    def test_an_unsourced_answer_says_so_instead_of_returning_empty(self):
+        """Text with no search behind it is discarded — but a silent "" reached
+        the report as a blank section with nothing said about it."""
+        with self.assertRaises(AICommentaryUnavailable) as caught:
+            self._write([types.SimpleNamespace(type="text", text="CORE UPDATE — from memory.")])
+        self.assertIn("without searching", str(caught.exception))
+
+    def test_a_searched_but_empty_answer_says_so_too(self):
+        with self.assertRaises(AICommentaryUnavailable) as caught:
+            self._write(
+                [
+                    types.SimpleNamespace(type="server_tool_use", name="web_search"),
+                    types.SimpleNamespace(type="web_search_tool_result", content=[]),
+                    types.SimpleNamespace(type="text", text="   "),
+                ]
+            )
+        self.assertIn("found nothing reliable", str(caught.exception))
+
+    def test_a_searched_answer_is_returned(self):
+        text = self._write(
+            [
+                types.SimpleNamespace(type="server_tool_use", name="web_search"),
+                types.SimpleNamespace(type="web_search_tool_result", content=[]),
+                types.SimpleNamespace(type="text", text="NO UPDATE — Quiet August 2026."),
+            ]
+        )
+        self.assertEqual(text, "NO UPDATE — Quiet August 2026.")
+
 
 class ReportContextTests(unittest.TestCase):
     def _context(self, **kwargs):

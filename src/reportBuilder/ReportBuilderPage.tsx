@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiRequest } from "../api";
 import { sourceLabel, SOURCE_ORDER } from "./blockCatalog";
-import { REPORT_CURRENCIES, REPORT_LANGUAGES } from "./types";
+import { REPORT_LANGUAGES } from "./types";
 import type {
   AiCommentsResponse,
   AiSearchIndustryResponse,
@@ -496,7 +496,6 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
     se_ranking_target?: string;
     ai_visibility_project?: string;
     ga4_sheet_id?: string;
-    report_currency?: string;
   }) {
     if (!token || !selectedClientId) return;
     setError(null);
@@ -520,8 +519,6 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
           ? patch.ga4_sheet_id
             ? "GA4/GSC sheet set — regenerate to pull from it."
             : "GA4/GSC sheet cleared — it will be looked up by name in Drive again."
-        : patch.report_currency !== undefined
-          ? `Revenue will be shown in ${patch.report_currency} — regenerate to apply it.`
         : patch.ai_visibility_project !== undefined
           ? patch.ai_visibility_project
             ? `AI-visibility data will be read from project “${patch.ai_visibility_project}”.`
@@ -662,8 +659,8 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
    */
   async function draftSearchIndustry(
     report: { period_label: string; default_comparison: string; blocks: GeneratedBlock[] },
-  ): Promise<string> {
-    const response = await apiRequest<AiSearchIndustryResponse>(
+  ): Promise<AiSearchIndustryResponse> {
+    return apiRequest<AiSearchIndustryResponse>(
       "/api/report-builder/ai/search-industry",
       {
         method: "POST",
@@ -676,7 +673,6 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
         },
       },
     );
-    return response.text ?? "";
   }
 
   /**
@@ -766,9 +762,15 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
       // independent, and run back to back they'd add up to over two minutes.
       // `.catch` is attached immediately so a rejection can't go unhandled while
       // we await the comments first.
-      const industryPending = selectedKeys.has(SEARCH_INDUSTRY_BLOCK_KEY)
-        ? draftSearchIndustry(response).catch(() => null)
-        : Promise.resolve("");
+      const industryPending: Promise<AiSearchIndustryResponse | null> =
+        selectedKeys.has(SEARCH_INDUSTRY_BLOCK_KEY)
+          ? draftSearchIndustry(response).catch((industryError: unknown) => ({
+              text: "",
+              reason:
+                industryError instanceof Error ? industryError.message : "unknown error",
+              block_type_key: SEARCH_INDUSTRY_BLOCK_KEY,
+            }))
+          : Promise.resolve(null);
 
       // Section commentary: fills into the preview already on screen.
       setAiStage("comments");
@@ -802,15 +804,20 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
         setAiStage("industry");
         const industry = await industryPending;
         setAiStage(null);
-        if (industry === null) {
-          setAiNotice(
-            "Claude could not research this month's search industry. Write that section yourself in the preview.",
-          );
-        } else if (industry) {
-          nextComments = { ...nextComments, [SEARCH_INDUSTRY_BLOCK_KEY]: industry };
+        if (industry && industry.text) {
+          nextComments = { ...nextComments, [SEARCH_INDUSTRY_BLOCK_KEY]: industry.text };
           setComments(nextComments);
           await refreshPreview(withComments(response.blocks, nextComments), response, custom);
           setStatus("Claude added this month's search-industry context.");
+        } else if (industry) {
+          // An empty section is a 200 too. Say which of the several empty
+          // outcomes it was — before this, a blank Search-industry section
+          // looked identical to one nobody had filled in yet.
+          setAiNotice(
+            `Search industry came back empty: ${
+              industry.reason || "Claude returned no text."
+            } Write that section yourself in the preview.`,
+          );
         }
       }
     } catch (generateError) {
@@ -1309,32 +1316,6 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
           </label>
         ) : null}
 
-        {/* GA4 reports revenue in its property's own currency and the collector
-            sheet does not carry it, so the symbol is set per client here. */}
-        {selectedClient ? (
-          <label className="field-stack">
-            <span>Revenue currency</span>
-            <select
-              className="auth-input"
-              value={selectedClient.report_currency || "₴"}
-              disabled={isSavingSettings}
-              onChange={(event) =>
-                void saveClientSettings({ report_currency: event.target.value })
-              }
-            >
-              {REPORT_CURRENCIES.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <small className="muted">
-              {justSavedField === "report_currency"
-                ? "Saved — regenerate or reopen the preview to see it."
-                : "Printed next to every revenue figure. Must match the currency of this client's GA4 property."}
-            </small>
-          </label>
-        ) : null}
 
         {selectedClient ? (
           <>
