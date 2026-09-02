@@ -10,6 +10,7 @@ from __future__ import annotations
 import typing
 
 import logging
+import re
 import time
 
 import httpx
@@ -105,9 +106,65 @@ def _normalize(value: typing.Optional[str]) -> str:
     return (value or "").strip().lower()
 
 
-def _name_matches(list_name: str, needles: list[str]) -> bool:
-    haystack = _normalize(list_name)
-    return any(n and n in haystack for n in needles)
+def _squash(value: typing.Optional[str]) -> str:
+    """A name reduced to letters and digits, lowercased.
+
+    The client's name is typed into the dashboard and the list's name into
+    ClickUp, by different people at different times, so spaces, case, dots and
+    dashes drift apart on their own. "Premium Plate Supply",
+    "premiumplatesupply" and "Premium-Plate_Supply" all have to compare equal.
+    """
+    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
+def _list_core(name: typing.Optional[str]) -> str:
+    """A list name without the bracketed suffix ClickUp lists carry.
+
+    Real names look like "Premiumplate (40)" or "factorydirectblinds.com(30)":
+    the number is the monthly hour budget, not part of the client's name, and it
+    has to come off before the name can be looked for inside a client's name.
+    """
+    return _squash(re.sub(r"\(.*?\)", " ", name or ""))
+
+
+# How long a list name must be before it is allowed to match *inside* a client
+# name. This direction is the loose one, so the floor is what keeps it honest:
+# the workspace is full of shared working lists — "List", "PBN", "CONTENT",
+# "MVP Tasks" — whose letters really do appear inside plausible client names
+# ("CONTENT" would otherwise claim a client called "Contentful"). Eight clears
+# every shared list in the workspace today while still admitting the case this
+# direction exists for, "Premiumplate" (12) inside "premiumplatesupply".
+_MIN_CORE_LENGTH = 8
+
+
+def _match_rank(list_name: str, needles: list[str]) -> typing.Optional[tuple[int, int]]:
+    """How well one list name matches the client — lower sorts better.
+
+    Three ways a name can match, in falling order of confidence:
+
+    0. the same name once case and punctuation are ignored;
+    1. the client's name appears inside the list name — "onebyone" inside
+       "onebyone (30)";
+    2. the list's name appears inside the client's name — the ClickUp list
+       "Premiumplate (40)" for the dashboard client "premiumplatesupply", which
+       is how the two systems actually drifted apart.
+
+    The second number is the negated length of what matched, so that when two
+    lists match at the same rank the more specific name wins.
+    """
+    squashed = _squash(list_name)
+    core = _list_core(list_name)
+    ranks: list[tuple[int, int]] = []
+    for needle in needles:
+        if not needle:
+            continue
+        if needle in (squashed, core):
+            ranks.append((0, -len(needle)))
+        elif needle in squashed:
+            ranks.append((1, -len(needle)))
+        elif len(core) >= _MIN_CORE_LENGTH and core in needle:
+            ranks.append((2, -len(core)))
+    return min(ranks) if ranks else None
 
 
 def _iter_all_lists(token: str) -> typing.Iterator[dict]:
@@ -153,25 +210,40 @@ def _iter_all_lists(token: str) -> typing.Iterator[dict]:
 def find_client_list(token: str, *, name: str, domain: str) -> typing.Optional[dict]:
     """Find the ClickUp list whose name matches the client.
 
-    Matches against the client name and the domain's root label (e.g.
-    "onebyone.ua" -> "onebyone"), so a list called "onebyone (30)" resolves.
-    Returns {id, name} of the first match, or None.
+    Matches the client's name and the domain's root label ("onebyone.ua" ->
+    "onebyone") against every visible list, ignoring case, spaces and
+    punctuation on both sides — see :func:`_match_rank` for the three ways a
+    name can match. The *best*-ranked list wins rather than the first one the
+    traversal happens to reach, so an exactly-named list is never lost to a
+    loosely-matching one earlier in the workspace.
+
+    Returns {id, name}, or None when nothing matches.
     """
 
     needles = []
     if name:
-        needles.append(_normalize(name))
-    root_label = _normalize(domain).split(".")[0] if domain else ""
+        needles.append(_squash(name))
+    root_label = _squash(_normalize(domain).split(".")[0]) if domain else ""
     if root_label:
         needles.append(root_label)
     needles = [n for n in dict.fromkeys(needles) if n]  # dedupe, keep order
     if not needles:
         return None
 
+    best: typing.Optional[tuple[tuple[int, int], dict]] = None
     for lst in _iter_all_lists(token):
-        if _name_matches(lst["name"], needles):
-            return {"id": lst["id"], "name": lst["name"]}
-    return None
+        rank = _match_rank(lst["name"], needles)
+        if rank is None:
+            continue
+        if best is None or rank < best[0]:
+            best = (rank, {"id": lst["id"], "name": lst["name"]})
+    if best is None:
+        logger.info("clickup_list_unmatched needles=%s", needles)
+        return None
+    logger.info(
+        "clickup_list_matched needles=%s list=%s rank=%s", needles, best[1]["name"], best[0][0]
+    )
+    return best[1]
 
 
 def fetch_task_time(token: str, task_id: str) -> list[dict]:

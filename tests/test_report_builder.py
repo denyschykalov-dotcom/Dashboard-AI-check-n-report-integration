@@ -1523,6 +1523,77 @@ class ClickUpClientMatchTests(unittest.TestCase):
         ):
             self.assertIsNone(find_client_list("tok", name="Unrelated", domain="nowhere.io"))
 
+    # -- names that drifted apart between the dashboard and ClickUp ------------
+
+    def _real_lists(self):
+        """Names taken from the live workspace, including the ones that broke."""
+        return [
+            {"id": "a", "name": "CONTENT", "folder": None},
+            {"id": "b", "name": "PBN", "folder": None},
+            {"id": "c", "name": "List", "folder": None},
+            {"id": "d", "name": "onebyone (30)", "folder": "Oleksiy"},
+            {"id": "e", "name": "tarsco (30)", "folder": "Oleksiy"},
+            {"id": "f", "name": "Premiumplate (40)", "folder": "Oleksiy"},
+            {"id": "g", "name": "factorydirectblinds.com(30)", "folder": "Oleksiy"},
+            {"id": "h", "name": "onebyoneshop (23)", "folder": None},
+            {"id": "i", "name": "LampConcept.se (25)", "folder": None},
+        ]
+
+    def _find(self, name, domain, lists=None):
+        with patch(
+            "backend.app.report_builder.data_sources.clickup_client._iter_all_lists",
+            return_value=iter(lists if lists is not None else self._real_lists()),
+        ):
+            return find_client_list("tok", name=name, domain=domain)
+
+    def test_a_shorter_list_name_matches_a_longer_client_name(self) -> None:
+        """The reported failure: dashboard "premiumplatesupply", list
+        "Premiumplate (40)". The old matcher only looked for the client name
+        *inside* the list name, so this pulled no tasks at all."""
+        match = self._find("premiumplatesupply", "premiumplatesupply.com")
+        self.assertEqual(match["name"], "Premiumplate (40)")
+
+    def test_spaces_case_and_punctuation_are_ignored(self) -> None:
+        for name in ("Premium Plate Supply", "PREMIUM-PLATE_SUPPLY", "  premium plate supply  "):
+            self.assertEqual(
+                self._find(name, "premiumplatesupply.com")["name"], "Premiumplate (40)", name
+            )
+
+    def test_an_exact_name_beats_a_longer_list_that_merely_contains_it(self) -> None:
+        """"onebyone" must not land on "onebyoneshop (23)" just because that
+        list comes first in the workspace — and vice versa."""
+        self.assertEqual(self._find("onebyone", "onebyone.ua")["name"], "onebyone (30)")
+        self.assertEqual(self._find("onebyoneshop", "onebyoneshop.com")["name"], "onebyoneshop (23)")
+
+    def test_a_dotted_list_name_still_matches_the_domain(self) -> None:
+        self.assertEqual(
+            self._find("Factory Direct Blinds", "factorydirectblinds.com")["name"],
+            "factorydirectblinds.com(30)",
+        )
+        self.assertEqual(
+            self._find("LampConcept.se", "lampconcept.se")["name"], "LampConcept.se (25)"
+        )
+
+    def test_a_short_list_name_never_claims_a_client(self) -> None:
+        """"PBN", "List" and "CONTENT" are shared working lists, not any
+        client's — and their letters do appear inside plausible client names.
+        Caught for real while writing this: "CONTENT" claimed "Contentful"."""
+        self.assertIsNone(self._find("Publisher BN Group", "pbnlisting.com"))
+        self.assertIsNone(self._find("Contentful", "contentful.io"))
+        self.assertIsNone(self._find("Listopia", "listopia.com"))
+
+    def test_the_loose_direction_needs_a_substantial_list_name(self) -> None:
+        """Documents the floor, so lowering it fails here rather than in a
+        report that quietly loaded another client's tasks."""
+        lists = [{"id": "x", "name": "Content", "folder": None}]  # 7 characters
+        self.assertIsNone(self._find("Contentful", "contentful.io", lists=lists))
+        lists = [{"id": "y", "name": "Contented", "folder": None}]  # 9 characters
+        self.assertIsNotNone(self._find("Contentedly", "contentedly.io", lists=lists))
+
+    def test_a_client_with_no_list_still_matches_nothing(self) -> None:
+        self.assertIsNone(self._find("eatlebab", "eatlebab.com"))
+        self.assertIsNone(self._find("Totally Unrelated", "nowhere-at-all.io"))
+
 
 class ClickUpIterAllListsTests(unittest.TestCase):
     """_iter_all_lists must also surface lists shared with the token via the
