@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiRequest } from "../api";
-import { sourceLabel, SOURCE_ORDER } from "./blockCatalog";
+import { sourceLabel } from "./blockCatalog";
 import { REPORT_LANGUAGES } from "./types";
 import type {
   AiCommentsResponse,
@@ -131,7 +131,8 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
   const [justSavedField, setJustSavedField] = useState<string | null>(null);
 
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
-  // The block currently being dragged in the report-order list.
+  // The explicit block order (see `orderedCatalog`), and the row being dragged.
+  const [blockOrder, setBlockOrder] = useState<string[]>([]);
   const [dragKey, setDragKey] = useState<string | null>(null);
 
   const [periodPreset, setPeriodPreset] = useState<PeriodPreset>("last_month");
@@ -191,30 +192,28 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
     [clients, selectedClientId],
   );
 
-  const groupedCatalog = useMemo(() => {
-    const groups = new Map<string, ReportBlockType[]>();
+  // One list does both jobs: the checkbox picks the block, its place in the list
+  // is where the block renders in the report. `blockOrder` holds only the keys the
+  // specialist has an explicit order for (dragged, or restored from a save);
+  // everything else is merged back in at its catalog position, which is the
+  // report's own default section order.
+  const orderedCatalog = useMemo(() => {
+    const rank = new Map(catalog.map((block, index) => [block.key, index]));
+    const at = (key: string) => rank.get(key) ?? Number.MAX_SAFE_INTEGER;
+    const keys = blockOrder.filter((key) => rank.has(key));
     catalog.forEach((block) => {
-      const list = groups.get(block.source) ?? [];
-      list.push(block);
-      groups.set(block.source, list);
+      if (keys.includes(block.key)) return;
+      const before = keys.findIndex((other) => at(other) > at(block.key));
+      keys.splice(before < 0 ? keys.length : before, 0, block.key);
     });
-    return SOURCE_ORDER.filter((source) => groups.has(source)).map((source) => ({
-      source,
-      blocks: groups.get(source) as ReportBlockType[],
-    }));
-  }, [catalog]);
+    const byKey = new Map(catalog.map((block) => [block.key, block]));
+    return keys.map((key) => byKey.get(key) as ReportBlockType);
+  }, [catalog, blockOrder]);
 
-  // The selection Set is ordered (insertion order), and that order is the report's
-  // section order — it round-trips through the saved selection's block_keys.
-  const orderedSelection = useMemo(() => Array.from(selectedKeys), [selectedKeys]);
-  const blockNames = useMemo(
-    () => new Map(catalog.map((block) => [block.key, block.display_name])),
-    [catalog],
-  );
-  // Catalog position = the report's default section order.
-  const catalogRank = useMemo(
-    () => new Map(catalog.map((block, index) => [block.key, index])),
-    [catalog],
+  // The selected blocks in report order — what generate/save/persist all send.
+  const orderedSelection = useMemo(
+    () => orderedCatalog.filter((block) => selectedKeys.has(block.key)).map((block) => block.key),
+    [orderedCatalog, selectedKeys],
   );
 
   const yearOptions = useMemo(() => {
@@ -333,6 +332,8 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
         { token },
       );
       setSelectedKeys(new Set(selection.block_keys));
+      // block_keys is stored in report order, so it doubles as the saved order.
+      setBlockOrder(selection.block_keys);
       const kind: ReportType = selection.report_type === "yearly" ? "yearly" : "monthly";
       setReportType(kind);
       setDateFrom(selection.date_from ?? "");
@@ -376,6 +377,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
       .catch(() => {
         // no saved selection yet (or load failed) — start from a clean slate
         setSelectedKeys(new Set());
+        setBlockOrder([]);
       })
       .finally(() => {
         selectionLoadedFor.current = selectedClientId;
@@ -393,7 +395,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
         method: "PUT",
         token,
         body: {
-          block_keys: Array.from(selectedKeys),
+          block_keys: orderedSelection,
           period_preset: timeframe.period_preset,
           comparisons: timeframe.comparisons,
           report_type: timeframe.report_type,
@@ -405,7 +407,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
       });
     }, 600);
     return () => window.clearTimeout(handle);
-  }, [token, selectedClientId, selectedKeys, buildTimeframe]);
+  }, [token, selectedClientId, orderedSelection, buildTimeframe]);
 
   // Esc leaves the full-screen preview, and the page behind it must not scroll
   // out from under the overlay.
@@ -433,32 +435,24 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
 
   function toggleBlock(key: string) {
     setSelectedKeys((current) => {
-      if (current.has(key)) {
-        const next = new Set(current);
+      const next = new Set(current);
+      if (next.has(key)) {
         next.delete(key);
-        return next;
+      } else {
+        next.add(key);
       }
-      // A newly checked block lands at its catalog position rather than at the
-      // end, so a selection nobody dragged always renders in the report's own
-      // section order regardless of the order the boxes were ticked in.
-      const rank = (other: string) => catalogRank.get(other) ?? Number.MAX_SAFE_INTEGER;
-      const keys = Array.from(current);
-      const at = keys.findIndex((other) => rank(other) > rank(key));
-      keys.splice(at < 0 ? keys.length : at, 0, key);
-      return new Set(keys);
+      return next;
     });
   }
 
-  /** Move one selected block to `toIndex` in the report order. */
+  /** Move one block to `toIndex` in the block list (= the report's order). */
   function moveBlock(key: string, toIndex: number) {
-    setSelectedKeys((current) => {
-      const keys = Array.from(current);
-      const from = keys.indexOf(key);
-      if (from < 0 || toIndex < 0 || toIndex >= keys.length) return current;
-      keys.splice(from, 1);
-      keys.splice(toIndex, 0, key);
-      return new Set(keys);
-    });
+    const keys = orderedCatalog.map((block) => block.key);
+    const from = keys.indexOf(key);
+    if (from < 0 || toIndex < 0 || toIndex >= keys.length) return;
+    keys.splice(from, 1);
+    keys.splice(toIndex, 0, key);
+    setBlockOrder(keys);
   }
 
   async function handleSaveClickupToken() {
@@ -743,7 +737,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
         token,
         body: {
           client_id: selectedClientId,
-          block_keys: Array.from(selectedKeys),
+          block_keys: orderedSelection,
           period_preset: timeframe.period_preset,
           comparisons: timeframe.comparisons,
           report_type: timeframe.report_type,
@@ -1112,6 +1106,8 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
       });
       setComments(loadedComments);
       setSelectedKeys(loadedKeys);
+      // The saved block positions are that report's section order.
+      setBlockOrder(detail.blocks.map((block) => block.block_type_key));
       // Merged over the defaults: reports saved before a customization field
       // existed have no key for it, and the preview must not read undefined.
       const reopenedCustomization = {
@@ -1702,73 +1698,60 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
           </div>
 
           <h3>Select blocks ({selectedKeys.size} selected)</h3>
-          {groupedCatalog.map((group) => (
-            <div key={group.source} className="report-block-group">
-              <h4>{sourceLabel(group.source)}</h4>
-              <div className="report-block-options">
-                {group.blocks.map((block) => (
-                  <label key={block.key} className="report-block-option">
-                    <input
-                      type="checkbox"
-                      checked={selectedKeys.has(block.key)}
-                      onChange={() => toggleBlock(block.key)}
-                    />
-                    <span>{block.display_name}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          ))}
-
-          {orderedSelection.length > 1 ? (
-            <div className="report-block-group">
-              <h4>Report order</h4>
-              <p className="report-hint">
-                Drag a block, or use the arrows, to change where it renders. The order is saved for
-                this client and used for every new report.
-              </p>
-              <ol className="report-order-list">
-                {orderedSelection.map((key, index) => (
-                  <li
-                    key={key}
-                    className={`report-order-item${dragKey === key ? " is-dragging" : ""}`}
-                    draggable
-                    onDragStart={() => setDragKey(key)}
-                    onDragEnd={() => setDragKey(null)}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      if (dragKey) moveBlock(dragKey, index);
-                      setDragKey(null);
-                    }}
-                  >
-                    <span className="report-order-grip" aria-hidden="true">
-                      ⠿
-                    </span>
-                    <span className="report-order-name">{blockNames.get(key) ?? key}</span>
-                    <button
-                      className="ghost-btn report-order-move"
-                      type="button"
-                      aria-label={`Move ${blockNames.get(key) ?? key} up`}
-                      disabled={index === 0}
-                      onClick={() => moveBlock(key, index - 1)}
-                    >
-                      ↑
-                    </button>
-                    <button
-                      className="ghost-btn report-order-move"
-                      type="button"
-                      aria-label={`Move ${blockNames.get(key) ?? key} down`}
-                      disabled={index === orderedSelection.length - 1}
-                      onClick={() => moveBlock(key, index + 1)}
-                    >
-                      ↓
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            </div>
-          ) : null}
+          <p className="report-hint">
+            Tick the blocks to include. Drag a row, or use the arrows, to change the order they
+            render in — the order is saved for this client.
+          </p>
+          <ol className="report-order-list">
+            {orderedCatalog.map((block, index) => (
+              <li
+                key={block.key}
+                className={`report-order-item${dragKey === block.key ? " is-dragging" : ""}${
+                  selectedKeys.has(block.key) ? " is-selected" : ""
+                }`}
+                draggable
+                onDragStart={() => setDragKey(block.key)}
+                onDragEnd={() => setDragKey(null)}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (dragKey) moveBlock(dragKey, index);
+                  setDragKey(null);
+                }}
+              >
+                <span className="report-order-grip" aria-hidden="true">
+                  ⠿
+                </span>
+                <label className="report-order-name">
+                  <input
+                    type="checkbox"
+                    checked={selectedKeys.has(block.key)}
+                    onChange={() => toggleBlock(block.key)}
+                  />
+                  <span>{block.display_name}</span>
+                </label>
+                <span className="report-order-source">{sourceLabel(block.source)}</span>
+                <button
+                  className="ghost-btn report-order-move"
+                  type="button"
+                  aria-label={`Move ${block.display_name} up`}
+                  disabled={index === 0}
+                  onClick={() => moveBlock(block.key, index - 1)}
+                >
+                  ↑
+                </button>
+                <button
+                  className="ghost-btn report-order-move"
+                  type="button"
+                  aria-label={`Move ${block.display_name} down`}
+                  disabled={index === orderedCatalog.length - 1}
+                  onClick={() => moveBlock(block.key, index + 1)}
+                >
+                  ↓
+                </button>
+              </li>
+            ))}
+          </ol>
 
           {selectedKeys.has("planned_works") ? (
             <div className="report-block-group report-planned-work">

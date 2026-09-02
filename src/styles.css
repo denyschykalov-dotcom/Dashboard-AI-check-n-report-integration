@@ -1976,27 +1976,14 @@ th {
   letter-spacing: 0.04em;
 }
 
-.report-block-options {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 8px;
-}
-
-.report-block-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  color: var(--text);
-}
-
 .report-hint {
   color: var(--muted);
   font-size: 13px;
   margin: 4px 0 0;
 }
 
-/* Drag-to-reorder list of the selected blocks (the report's section order). */
+/* The block list: a checkbox picks the block, its row position is where the
+   block renders in the report. */
 .report-order-list {
   list-style: none;
   margin: 8px 0 0;
@@ -2013,8 +2000,13 @@ th {
   border: 1px solid var(--line);
   border-radius: 6px;
   font-size: 14px;
-  color: var(--text);
+  color: var(--muted);
   cursor: grab;
+}
+
+.report-order-item.is-selected {
+  color: var(--text);
+  border-color: var(--accent);
 }
 
 .report-order-item.is-dragging {
@@ -2026,7 +2018,18 @@ th {
 }
 
 .report-order-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: 1;
+  cursor: pointer;
+}
+
+.report-order-source {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .report-order-move {
