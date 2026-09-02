@@ -37,7 +37,10 @@ from backend.app.report_builder.data_sources.sheets_client import (
 
 
 # canonical tab name -> known alternate titles seen across real client sheets,
-# in priority order (first match wins).
+# in priority order (first match wins). Matching ignores case and repeated
+# spaces (see ``resolve_tab_name``), so only genuinely different wordings need
+# listing here — and "AI" and "LLM" are the same thing in a tab name, written
+# both ways across sheets.
 _TAB_ALIASES: dict[str, list[str]] = {
     "GA4 Summary": ["GA4 Summary", "GA4 Overview"],
     "GA4 Channels": ["GA4 Channels"],
@@ -46,10 +49,14 @@ _TAB_ALIASES: dict[str, list[str]] = {
     "GA4 Top Pages": ["GA4 Top Pages"],
     "GA4 Ecommerce": ["GA4 Ecommerce"],
     "GA4 Ecommerce Organic": ["GA4 Ecommerce Organic"],
-    "GA4 AI Ecommerce": ["GA4 AI Ecommerce", "GA4 Ecommerce AI"],
-    "GA4 AI Summary": ["GA4 AI Summary"],
-    "GA4 AI Traffic": ["GA4 AI Traffic"],
-    "GA4 AI Top Pages": ["GA4 AI Top Pages"],
+    "GA4 AI Ecommerce": [
+        "GA4 AI Ecommerce", "GA4 Ecommerce AI",
+        "GA4 LLM Ecommerce", "GA4 LLMs Ecommerce",
+        "GA4 Ecommerce LLM", "GA4 Ecommerce LLMs",
+    ],
+    "GA4 AI Summary": ["GA4 AI Summary", "GA4 LLM Summary", "GA4 LLMs Summary"],
+    "GA4 AI Traffic": ["GA4 AI Traffic", "GA4 LLM Traffic", "GA4 LLMs Traffic"],
+    "GA4 AI Top Pages": ["GA4 AI Top Pages", "GA4 LLM Top Pages", "GA4 LLMs Top Pages"],
 }
 
 _TOP_PAGES_LIMIT = 20

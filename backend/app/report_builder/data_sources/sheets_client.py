@@ -17,6 +17,7 @@ from datetime import date, datetime
 from functools import lru_cache
 
 import logging
+import re
 
 import httpx
 
@@ -154,11 +155,21 @@ def list_sheet_tabs(sheet_id: str) -> set[str]:
 def resolve_tab_name(available: set[str], aliases: list[str]) -> typing.Optional[str]:
     """Pick whichever of a canonical tab's known alternate names actually
     exists in this sheet (different client sheets use slightly different tab
-    names for the same data, e.g. "GA4 Summary" vs "GA4 Overview")."""
+    names for the same data, e.g. "GA4 Summary" vs "GA4 Overview").
+
+    Matched exactly first, then ignoring case and repeated spaces. Tab names are
+    typed by hand in Google Sheets, so "GA4 AI ecommerce" or a trailing space is
+    the same tab to a human and used to be a missing section in the report.
+    """
 
     for alias in aliases:
         if alias in available:
             return alias
+    loose = {re.sub(r"\s+", " ", name).strip().lower(): name for name in available}
+    for alias in aliases:
+        actual = loose.get(re.sub(r"\s+", " ", alias).strip().lower())
+        if actual:
+            return actual
     return None
 
 

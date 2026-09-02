@@ -686,6 +686,20 @@ class SheetsClientDriveTests(unittest.TestCase):
         self.assertEqual(resolve_tab_name(available, ["GA4 Summary", "GA4 Overview"]), "GA4 Overview")
         self.assertIsNone(resolve_tab_name(available, ["GA4 Ecommerce"]))
 
+    def test_resolve_tab_name_ignores_case_and_stray_spaces(self) -> None:
+        """Tab names are typed by hand, so "GA4 AI ecommerce" is the same tab."""
+        available = {"GA4 AI ecommerce ", "GA4  Summary"}
+        self.assertEqual(resolve_tab_name(available, ["GA4 AI Ecommerce"]), "GA4 AI ecommerce ")
+        self.assertEqual(resolve_tab_name(available, ["GA4 Summary"]), "GA4  Summary")
+
+    def test_an_llm_named_tab_resolves_to_the_ai_ecommerce_tab(self) -> None:
+        """Sheets write the same tab as "AI" or "LLM"; both feed the AI-revenue
+        cards, which rendered nothing at all when the name was not recognised."""
+        for name in ("GA4 LLM Ecommerce", "GA4 Ecommerce LLMs", "GA4 llm ecommerce"):
+            self.assertEqual(
+                resolve_tab_name({name}, ga4._TAB_ALIASES["GA4 AI Ecommerce"]), name
+            )
+
 
 class AhrefsClientDateTests(unittest.TestCase):
     def test_report_dates_use_most_recent_complete_month(self) -> None:
