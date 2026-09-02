@@ -98,10 +98,18 @@ export type ReportSummary = {
   period_label: string;
   default_comparison: string;
   customization: ReportCustomization | null;
+  /** Token behind the public /r/<token> page; null means the report is not shared. */
+  share_token: string | null;
   generated_by: string;
   generated_at: string;
   created_at: string;
   updated_at: string;
+};
+
+/** The public link for one report; both fields are null once it is revoked. */
+export type ReportShareResponse = {
+  share_token: string | null;
+  share_path: string | null;
 };
 
 export type ReportListResponse = {

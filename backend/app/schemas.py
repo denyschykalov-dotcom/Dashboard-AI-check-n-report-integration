@@ -90,6 +90,12 @@ class ClientSettingsRequest(BaseModel):
     ga4_sheet_id: typing.Optional[str] = Field(default=None, max_length=300)
 
 
+class ReportShareRequest(BaseModel):
+    """Turn a report's public /r/<token> link on or off."""
+
+    shared: bool
+
+
 class GenerateReportRequest(BaseModel):
     client_id: uuid.UUID
     block_keys: list[str] = Field(default_factory=list)

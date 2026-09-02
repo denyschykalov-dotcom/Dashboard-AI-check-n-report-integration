@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import RedirectResponse
 
-from backend.app.api.routes import router
+from backend.app.api.routes import public_router, router
 from backend.app.logging_config import configure_logging
 from backend.app.migrations.runner import run_pending_migrations
 
@@ -30,6 +30,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router)
+# Before the SPA's catch-all static mount, or /r/<token> would serve index.html.
+app.include_router(public_router)
 
 
 @app.middleware("http")

@@ -37,6 +37,7 @@ from backend.app.schemas import (
     ReportAiRequest,
     ReportPreviewRequest,
     ReportSaveRequest,
+    ReportShareRequest,
     ReportUpdateRequest,
     RunStartRequest,
     SelectionSaveRequest,
@@ -1092,4 +1093,68 @@ def export_report(
         content=document,
         media_type="text/html",
         headers={"Content-Disposition": f'attachment; filename="{filename_base}.html"'},
+    )
+
+
+@router.put("/report-builder/reports/{report_id}/share")
+def set_report_share_link(
+    report_id: uuid.UUID,
+    payload: ReportShareRequest,
+    session: Session = Depends(get_db_session),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """Turn this report's public link on or off.
+
+    On gives back a token to put in a `/r/<token>` URL, which serves the same
+    rendered report the export produces, with no login. Off drops the token,
+    which kills any link already sent.
+    """
+    try:
+        token = report_service.set_report_share(
+            session, report_id=report_id, shared=payload.shared
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    logger.info(
+        "report_share_%s report_id=%s requester_user_id=%s",
+        "enabled" if token else "revoked", report_id, current_user.user_id,
+    )
+    return {"share_token": token, "share_path": f"/r/{token}" if token else None}
+
+
+# --- public: the shared report page -------------------------------------------
+#
+# Its own router because it must not sit under /api and must not require a
+# login — the whole point is a URL a client can open. Everything it serves is
+# the finished, non-editable report the export already produces.
+public_router = APIRouter()
+
+
+@public_router.get("/r/{share_token}")
+def view_shared_report(
+    share_token: str,
+    session: Session = Depends(get_db_session),
+) -> Response:
+    try:
+        report, blocks = report_service.get_shared_report(session, share_token)
+    except LookupError:
+        # Same 404 for an unknown token and a revoked one, and no detail: a
+        # public endpoint should not confirm which reports exist.
+        raise HTTPException(status_code=404, detail="This report link is not available.")
+
+    client = session.get(Client, report.client_id)
+    document = report_export.build_report_html(
+        report,
+        blocks,
+        client_name=client.name if client else "Client",
+        client_domain=client.domain if client else "",
+        language=_client_language(client) if client else localization.DEFAULT_LANGUAGE,
+    )
+    # Rendered in the browser, not downloaded — no Content-Disposition. Told not
+    # to cache, so revoking a link takes effect immediately, and kept out of
+    # search results in case a client posts the URL somewhere public.
+    return Response(
+        content=document,
+        media_type="text/html",
+        headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"},
     )

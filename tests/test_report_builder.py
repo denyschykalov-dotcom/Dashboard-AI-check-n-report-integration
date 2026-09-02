@@ -2,6 +2,8 @@ import os
 import time
 import unittest
 import uuid
+
+import httpx
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -26,6 +28,7 @@ from backend.app.report_builder.block_catalog import BLOCK_CATALOG, get_block
 from backend.app.report_builder.data_sources import (
     ahrefs, ai_visibility, clickup, ga4, gsc, se_ranking, static_editorial,
 )
+from backend.app.report_builder.data_sources import ahrefs_client
 from backend.app.report_builder.data_sources.ahrefs_client import AhrefsAccessError, resolve_report_dates
 from backend.app.report_builder.data_sources import clickup_client as clickup_client_module
 from backend.app.report_builder.data_sources.clickup_client import ClickUpAccessError, find_client_list
@@ -827,6 +830,27 @@ class AhrefsResolverTests(unittest.TestCase):
         self.assertEqual(result.data["metrics"]["current"]["org_keywords"], 3611)
         self.assertEqual(result.data["metrics"]["current"]["org_keywords_top3"], 1358)
         self.assertEqual(result.data["trend"][0], ["2025-05", 73421])
+
+    def test_every_call_covers_subdomains_not_the_bare_domain(self) -> None:
+        """A site served from www.<domain> is a subdomain to Ahrefs.
+
+        With mode=domain, eatlebab.com reported 0 organic visits, 0 keywords, an
+        empty trend and 628 of its 20,642 backlinks — while Top movers, already
+        on mode=subdomains, listed its www pages. Every call must agree.
+        """
+        seen: list[dict] = []
+
+        def record(endpoint, params):
+            seen.append(params)
+            return self._responses[endpoint]
+
+        with patch("backend.app.report_builder.data_sources.ahrefs.ahrefs_client.get", side_effect=record):
+            ahrefs.resolve(get_block("ahrefs_domain_analysis"), self._context())
+            ahrefs.resolve(get_block("ahrefs_top_movers"), self._context())
+
+        with_mode = [params for params in seen if "mode" in params]
+        self.assertTrue(with_mode)
+        self.assertEqual({params["mode"] for params in with_mode}, {"subdomains"})
 
     def test_top_movers_returns_gainers_and_losers(self) -> None:
         with patch("backend.app.report_builder.data_sources.ahrefs.ahrefs_client.get", side_effect=self._fake_get):
@@ -2649,6 +2673,137 @@ class AiRevenueWithoutMonetizationTests(unittest.TestCase):
         }
         ai_ecom = self._ai_ecom([monetization, self._ai_traffic_block()])
         self.assertEqual(ai_ecom["2026-06"]["purchases"], 7)
+
+
+class AhrefsRetryTests(unittest.TestCase):
+    """One retry, and only for the failures a second attempt could fix."""
+
+    def _response(self, status: int, body: dict | None = None):
+        return SimpleNamespace(
+            status_code=status,
+            content=b"{}",
+            text="{}",
+            json=lambda: (body if body is not None else {}),
+        )
+
+    def _get(self, responses):
+        calls = {"n": 0}
+
+        def fake_get(*args, **kwargs):
+            result = responses[calls["n"]]
+            calls["n"] += 1
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with patch("httpx.get", side_effect=fake_get), \
+             patch("backend.app.report_builder.data_sources.ahrefs_client._token", return_value="tok"), \
+             patch("backend.app.report_builder.data_sources.ahrefs_client.time.sleep") as slept:
+            try:
+                return ahrefs_client.get("metrics", {"target": "acme.com"}), calls["n"], slept
+            except AhrefsAccessError as error:
+                return error, calls["n"], slept
+
+    def test_a_rate_limit_is_retried_once_and_can_succeed(self) -> None:
+        out, calls, slept = self._get([
+            self._response(429),
+            self._response(200, {"metrics": {"org_traffic": 5910}}),
+        ])
+        self.assertEqual(out, {"metrics": {"org_traffic": 5910}})
+        self.assertEqual(calls, 2)
+        slept.assert_called_once()
+
+    def test_a_dropped_connection_is_retried_once(self) -> None:
+        out, calls, _ = self._get([
+            httpx.ConnectError("connection reset"),
+            self._response(200, {"metrics": {}}),
+        ])
+        self.assertEqual(out, {"metrics": {}})
+        self.assertEqual(calls, 2)
+
+    def test_it_gives_up_after_the_second_attempt(self) -> None:
+        out, calls, _ = self._get([self._response(503), self._response(503)])
+        self.assertIsInstance(out, AhrefsAccessError)
+        self.assertEqual(calls, 2)
+
+    def test_a_rejected_token_is_not_retried(self) -> None:
+        out, calls, slept = self._get([self._response(401)])
+        self.assertIsInstance(out, AhrefsAccessError)
+        self.assertEqual(calls, 1)
+        slept.assert_not_called()
+
+    def test_a_bad_request_is_not_retried(self) -> None:
+        """400 "bad date" returns the same thing every time."""
+        out, calls, _ = self._get([self._response(400)])
+        self.assertIsInstance(out, AhrefsAccessError)
+        self.assertEqual(calls, 1)
+
+
+class ReportShareLinkTests(unittest.TestCase):
+    """The public /r/<token> page: opt-in, revocable, and 404 for anything else."""
+
+    def setUp(self) -> None:
+        self.session = _make_session()
+        self.client = _client(self.session, name="Acme Co", domain="acme.com")
+
+    def _report(self):
+        return report_service.save_report(
+            self.session,
+            client_id=self.client.id,
+            period_label="Jun 2026",
+            blocks=[{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""}],
+            generated_by=uuid.uuid4(),
+        )
+
+    def test_a_new_report_is_not_shared(self) -> None:
+        report = self._report()
+        self.assertIsNone(report.share_token)
+        self.assertIsNone(report_service.serialize_report_summary(report)["share_token"])
+
+    def test_sharing_mints_a_token_and_finds_the_report_by_it(self) -> None:
+        report = self._report()
+        token = report_service.set_report_share(
+            self.session, report_id=report.id, shared=True
+        )
+        self.assertTrue(token)
+        self.assertGreater(len(token), 30)
+        found, blocks = report_service.get_shared_report(self.session, token)
+        self.assertEqual(found.id, report.id)
+        self.assertEqual(len(blocks), 1)
+
+    def test_sharing_twice_keeps_the_link_already_sent_working(self) -> None:
+        report = self._report()
+        first = report_service.set_report_share(self.session, report_id=report.id, shared=True)
+        second = report_service.set_report_share(self.session, report_id=report.id, shared=True)
+        self.assertEqual(first, second)
+
+    def test_revoking_kills_the_link_and_a_new_one_differs(self) -> None:
+        report = self._report()
+        first = report_service.set_report_share(self.session, report_id=report.id, shared=True)
+        self.assertIsNone(
+            report_service.set_report_share(self.session, report_id=report.id, shared=False)
+        )
+        with self.assertRaises(LookupError):
+            report_service.get_shared_report(self.session, first)
+        again = report_service.set_report_share(self.session, report_id=report.id, shared=True)
+        self.assertNotEqual(again, first)
+
+    def test_an_unknown_or_empty_token_is_a_lookup_error(self) -> None:
+        for token in ("", "   ", "not-a-real-token"):
+            with self.assertRaises(LookupError):
+                report_service.get_shared_report(self.session, token)
+
+    def test_revoking_clears_the_cached_report_so_the_link_dies_at_once(self) -> None:
+        report = self._report()
+        token = report_service.set_report_share(self.session, report_id=report.id, shared=True)
+        report_service.get_shared_report(self.session, token)  # warms the cache
+        report_service.set_report_share(self.session, report_id=report.id, shared=False)
+        with self.assertRaises(LookupError):
+            report_service.get_shared_report(self.session, token)
+
+    def test_sharing_an_unknown_report_is_a_lookup_error(self) -> None:
+        with self.assertRaises(LookupError):
+            report_service.set_report_share(self.session, report_id=uuid.uuid4(), shared=True)
 
 
 if __name__ == "__main__":

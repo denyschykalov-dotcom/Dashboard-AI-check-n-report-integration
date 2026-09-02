@@ -204,6 +204,10 @@ class Report(Base):
     # JSON blob of report customization (accent, text style, per-block chart
     # variants, section visibility). None means "template defaults".
     customization: Mapped[typing.Optional[str]] = mapped_column(Text)
+    # Random token behind the public /r/<token> page, so a client can open the
+    # report in a browser without a dashboard login. NULL means not shared —
+    # sharing is opt-in per report, and clearing it revokes the link for good.
+    share_token: Mapped[typing.Optional[str]] = mapped_column(Text, unique=True)
     generated_by: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow

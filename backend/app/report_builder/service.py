@@ -10,6 +10,7 @@ import typing
 import json
 import logging
 import re
+import secrets
 import time
 import uuid
 
@@ -496,6 +497,7 @@ _REPORT_SNAPSHOT_FIELDS = (
     "period_label",
     "default_comparison",
     "customization",
+    "share_token",
     "generated_by",
     "generated_at",
     "created_at",
@@ -535,6 +537,54 @@ def _prune_report_cache(now: float) -> None:
     while len(_REPORT_CACHE) >= _REPORT_CACHE_MAX_ENTRIES:
         soonest = min(_REPORT_CACHE, key=lambda key: _REPORT_CACHE[key][0])
         _REPORT_CACHE.pop(soonest, None)
+
+
+# Long enough that guessing one is not a threat model: 32 random bytes, so the
+# link is the only way in. Anyone holding it sees the report, which is the point
+# — the guard is that sharing is opt-in and revocable.
+_SHARE_TOKEN_BYTES = 32
+
+
+def set_report_share(
+    session: Session, *, report_id: uuid.UUID, shared: bool
+) -> typing.Optional[str]:
+    """Turn a report's public link on or off; returns the token, None when off.
+
+    Turning it on twice keeps the same token, so a link already sent to a client
+    keeps working. Turning it off drops the token, which revokes that link
+    permanently — sharing again mints a new one rather than resurrecting it.
+    """
+    report = session.get(Report, report_id)
+    if report is None:
+        raise LookupError("Report not found.")
+    if not shared:
+        report.share_token = None
+    elif not report.share_token:
+        report.share_token = secrets.token_urlsafe(_SHARE_TOKEN_BYTES)
+    session.commit()
+    session.refresh(report)
+    invalidate_report_cache(report_id)
+    return report.share_token
+
+
+def get_shared_report(
+    session: Session, share_token: str
+) -> tuple[Report, list[ReportBlock]]:
+    """The report behind a public link. LookupError for anything else.
+
+    Deliberately the same error for an unknown token and for a report whose
+    sharing was revoked: a public endpoint should not tell a caller which of the
+    two a token is.
+    """
+    token = (share_token or "").strip()
+    if not token:
+        raise LookupError("Report not found.")
+    report = session.execute(
+        select(Report).where(Report.share_token == token)
+    ).scalar_one_or_none()
+    if report is None:
+        raise LookupError("Report not found.")
+    return get_report(session, report.id)
 
 
 def get_report(session: Session, report_id: uuid.UUID) -> tuple[Report, list[ReportBlock]]:
@@ -603,6 +653,7 @@ def serialize_report_summary(report: Report) -> dict[str, object]:
             if report.customization
             else None
         ),
+        "share_token": report.share_token,
         "generated_by": str(report.generated_by),
         "generated_at": report.generated_at,
         "created_at": report.created_at,

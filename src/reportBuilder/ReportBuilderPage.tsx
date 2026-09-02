@@ -22,6 +22,7 @@ import type {
   ReportListResponse,
   ReportSelection,
   ReportSettingsStatus,
+  ReportShareResponse,
   ReportSummary,
   ReportType,
   ReportBlockType,
@@ -156,6 +157,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
   // `${reportId}:${format}` of the export currently in flight, so only that
   // one button shows a loading state (PDF rendering takes a few seconds).
   const [exportingReportId, setExportingReportId] = useState<string | null>(null);
+  const [sharingReportId, setSharingReportId] = useState<string | null>(null);
   // Deleting a saved report drops it and its blocks for everyone, so it goes
   // through a confirmation step rather than firing straight off the row button.
   const [reportPendingDelete, setReportPendingDelete] = useState<ReportSummary | null>(null);
@@ -1128,6 +1130,47 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
     }
   }
 
+  /**
+   * Turn a report's public link on or off.
+   *
+   * On copies the URL to the clipboard straight away — the link is the whole
+   * point, and a token shown in a toast is a token nobody can use. Off revokes
+   * it: any link already sent stops working.
+   */
+  async function handleShare(report: ReportSummary, shared: boolean) {
+    if (!token) return;
+    setError(null);
+    setSharingReportId(report.id);
+    try {
+      const response = await apiRequest<ReportShareResponse>(
+        `/api/report-builder/reports/${report.id}/share`,
+        { method: "PUT", token, body: { shared } },
+      );
+      setSavedReports((current) =>
+        current.map((row) =>
+          row.id === report.id ? { ...row, share_token: response.share_token } : row,
+        ),
+      );
+      if (!response.share_path) {
+        setStatus(`Link for ${report.period_label} revoked — it no longer opens.`);
+        return;
+      }
+      const url = `${window.location.origin}${response.share_path}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        setStatus(`Link copied — anyone with it can open the ${report.period_label} report.`);
+      } catch {
+        // Clipboard is blocked on http:// origins and in some browsers. Showing
+        // the URL beats a success message with nothing to paste.
+        setStatus(`Share link for ${report.period_label}: ${url}`);
+      }
+    } catch (shareError) {
+      setError(shareError instanceof Error ? shareError.message : "Failed to update the share link.");
+    } finally {
+      setSharingReportId(null);
+    }
+  }
+
   async function handleExport(reportId: string, format: "html" | "pdf" | "md" = "html") {
     if (!token) return;
     setError(null);
@@ -1818,6 +1861,33 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
                       <button className="ghost-btn" type="button" onClick={() => void handlePreview(report.id)}>
                         Preview
                       </button>
+                      <button
+                        className="ghost-btn"
+                        type="button"
+                        onClick={() => void handleShare(report, true)}
+                        disabled={sharingReportId === report.id}
+                        title={
+                          report.share_token
+                            ? "Copy the link again, or use Unshare to kill it"
+                            : "Create a link a client can open without logging in"
+                        }
+                      >
+                        {sharingReportId === report.id
+                          ? "Working…"
+                          : report.share_token
+                            ? "Copy link"
+                            : "Share link"}
+                      </button>
+                      {report.share_token ? (
+                        <button
+                          className="ghost-btn"
+                          type="button"
+                          onClick={() => void handleShare(report, false)}
+                          disabled={sharingReportId === report.id}
+                        >
+                          Unshare
+                        </button>
+                      ) : null}
                       <button
                         className="ghost-btn"
                         type="button"

@@ -24,6 +24,12 @@ from backend.app.report_builder.data_sources.ahrefs_client import AhrefsAccessEr
 from backend.app.report_builder.data_sources.base import BlockResult, ResolveContext
 
 
+# Every Site Explorer call that takes a mode uses this one. "domain" excludes
+# the www subdomain, so a site served from www.<domain> reported zero organic
+# traffic, zero keywords, an empty trend chart and a fraction of its backlinks —
+# while Top movers, which already used "subdomains", listed its www pages. Seen
+# on eatlebab.com: 0 vs 5,910 organic visits. For a site that is not on a
+# subdomain the two modes return identical numbers.
 _MODE = "subdomains"  # cover root + www + all paths on the domain
 _MOVERS_LIMIT = 20
 _MOVERS_SELECT = ",".join(
@@ -55,7 +61,7 @@ def _int(value: typing.Any) -> int:
 def _metrics_for(target: str, when: date) -> dict[str, object]:
     payload = ahrefs_client.get(
         "metrics",
-        {"target": target, "date": when.isoformat(), "mode": "domain", "volume_mode": "monthly"},
+        {"target": target, "date": when.isoformat(), "mode": _MODE, "volume_mode": "monthly"},
     )
     m = payload.get("metrics", {}) or {}
     return {
@@ -83,7 +89,7 @@ def _load_domain_analysis(context: ResolveContext, dates: ReportDates) -> dict[s
 
     bl = ahrefs_client.get(
         "backlinks-stats",
-        {"target": target, "date": dates.current.isoformat(), "mode": "domain"},
+        {"target": target, "date": dates.current.isoformat(), "mode": _MODE},
     ).get("metrics", {}) or {}
 
     history = ahrefs_client.get(
@@ -93,7 +99,7 @@ def _load_domain_analysis(context: ResolveContext, dates: ReportDates) -> dict[s
             "date_from": dates.trend_from.isoformat(),
             "date_to": dates.current.isoformat(),
             "history_grouping": "monthly",
-            "mode": "domain",
+            "mode": _MODE,
             "volume_mode": "monthly",
         },
     ).get("metrics", []) or []
