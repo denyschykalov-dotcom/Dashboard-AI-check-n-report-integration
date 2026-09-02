@@ -462,6 +462,15 @@ class GA4SheetResolverTests(unittest.TestCase):
         self.assertEqual(result.data["tools"][0]["source"], "chatgpt.com")
         self.assertEqual(result.data["top_pages"][0]["page"], "/")
 
+    def test_ai_traffic_carries_ai_sales_without_the_monetization_block(self) -> None:
+        """The AI-Traffic section shows AI revenue, so it must not depend on the
+        monetization block being selected to supply it."""
+        with _patched_ga4_sheet():
+            result = ga4.resolve(get_block("ga4_ai_traffic"), self._context())
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.data["ecommerce"]["current"]["purchases"], 42)
+        self.assertAlmostEqual(result.data["ecommerce"]["current"]["revenue"], 185000.50)
+
     def test_non_ga4_block_key_is_unavailable(self) -> None:
         with _patched_ga4_sheet():
             result = ga4.resolve(get_block("ai_visibility_all_1mo"), self._context())
@@ -2420,6 +2429,111 @@ class ReportCacheTests(unittest.TestCase):
             len(report_service._REPORT_CACHE),
             report_service._REPORT_CACHE_MAX_ENTRIES,
         )
+
+
+class RevenueCurrencyTests(unittest.TestCase):
+    """Revenue figures are printed in the client's currency, not a hardcoded ₴."""
+
+    def setUp(self) -> None:
+        self.session = _make_session()
+
+    def _data(self, **kwargs):
+        import json as _json
+        import re as _re
+
+        doc = report_export.build_preview_html(
+            period_label="Jun 2026",
+            default_comparison="mom",
+            blocks=[{"block_type_key": "intro_header", "status": "ok", "data": {}, "comment": ""}],
+            client_name="Acme Co",
+            client_domain="acme.com",
+            **kwargs,
+        )
+        raw = _re.search(r"window\.DATA=(\{.*?\});</script>", doc, _re.DOTALL).group(1)
+        raw = raw.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+        return _json.loads(raw)
+
+    def test_currency_reaches_the_template(self) -> None:
+        self.assertEqual(self._data(currency="$")["meta"]["currency"], "$")
+
+    def test_currency_defaults_to_the_hryvnia_the_template_used_to_hardcode(self) -> None:
+        self.assertEqual(self._data()["meta"]["currency"], "₴")
+
+    def test_a_clients_currency_round_trips_through_settings(self) -> None:
+        client = _client(self.session, name="PartsVu", domain="partsvu.com")
+        self.assertEqual(report_service.serialize_client(client)["report_currency"], "₴")
+        updated = report_service.update_client_settings(
+            self.session, client_id=client.id, report_currency="$"
+        )
+        self.assertEqual(report_service.serialize_client(updated)["report_currency"], "$")
+        # Cleared back to the default rather than left blank.
+        cleared = report_service.update_client_settings(
+            self.session, client_id=client.id, report_currency="  "
+        )
+        self.assertEqual(cleared.report_currency, "₴")
+
+
+class AiRevenueWithoutMonetizationTests(unittest.TestCase):
+    """The AI-Traffic section's revenue cards read DATA.aiEcom, which used to be
+    filled only by the monetization block — so a report without that block showed
+    no AI revenue at all."""
+
+    def _ai_ecom(self, blocks):
+        import json as _json
+        import re as _re
+
+        doc = report_export.build_preview_html(
+            period_label="Jun 2026",
+            default_comparison="mom",
+            blocks=blocks,
+            client_name="Acme Co",
+            client_domain="acme.com",
+        )
+        raw = _re.search(r"window\.DATA=(\{.*?\});</script>", doc, _re.DOTALL).group(1)
+        raw = raw.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+        return _json.loads(raw).get("aiEcom") or {}
+
+    def _ai_traffic_block(self):
+        return {
+            "block_type_key": "ga4_ai_traffic",
+            "status": "ok",
+            "comment": "",
+            "data": {
+                "period": "Jun 2026",
+                "previous_period": "May 2026",
+                "summary": {
+                    "current": {"total_ai_sessions": 1057, "engaged_sessions": 800, "engagement_rate": 75.7},
+                    "previous": {"total_ai_sessions": 900, "engaged_sessions": 700, "engagement_rate": 77.8},
+                },
+                "tools": [],
+                "top_pages": [],
+                "ecommerce": {
+                    "current": {"purchases": 42, "revenue": 185000.5, "add_to_carts": 90, "checkouts": 60},
+                    "previous": {"purchases": 31, "revenue": 120000.0, "add_to_carts": 70, "checkouts": 50},
+                },
+            },
+        }
+
+    def test_ai_sales_render_from_the_ai_traffic_block_alone(self) -> None:
+        ai_ecom = self._ai_ecom([self._ai_traffic_block()])
+        self.assertEqual(ai_ecom["2026-06"]["purchases"], 42)
+        self.assertAlmostEqual(ai_ecom["2026-06"]["revenue"], 185000.5)
+        self.assertEqual(ai_ecom["2026-05"]["purchases"], 31)
+
+    def test_the_monetization_block_still_wins_when_both_are_present(self) -> None:
+        monetization = {
+            "block_type_key": "ga4_monetization",
+            "status": "ok",
+            "comment": "",
+            "data": {
+                "period": "Jun 2026",
+                "previous_period": "May 2026",
+                "site_wide": {"current": {"purchases": 6058, "revenue": 9e6, "add_to_carts": 1, "checkouts": 1}},
+                "ai": {"current": {"purchases": 7, "revenue": 100.0, "add_to_carts": 1, "checkouts": 1}},
+            },
+        }
+        ai_ecom = self._ai_ecom([monetization, self._ai_traffic_block()])
+        self.assertEqual(ai_ecom["2026-06"]["purchases"], 7)
 
 
 if __name__ == "__main__":

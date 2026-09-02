@@ -339,21 +339,22 @@ def commentable_block_keys(blocks: list[dict[str, object]]) -> list[str]:
     """The sections that get a generated comment.
 
     A block only qualifies if it resolved with data *and* the report template has
-    a place to show its comment — the AI-visibility and chart-variant blocks
-    render inside another section, so a comment on them would never be seen.
+    a place to show its comment. One key per template section: the eight
+    AI-visibility blocks all render as tabs inside section b15, which holds a
+    single comment box, so the first of them that resolved ok carries it.
     """
     keys: list[str] = []
+    sections: set[str] = set()
     for block in blocks:
         key = str(block.get("block_type_key") or "")
-        if not key or key in _NO_COMMENT_BLOCKS or key in keys:
+        if not key or key in _NO_COMMENT_BLOCKS:
             continue
         if (block.get("status") or "ok") != "ok":
             continue
-        if key not in SECTION_BY_KEY:
+        section = SECTION_BY_KEY.get(key)
+        if not section or section in sections:
             continue
-        block_type = get_block(key)
-        if block_type is not None and block_type.source == "ai_visibility":
-            continue
+        sections.add(section)
         keys.append(key)
     return keys
 

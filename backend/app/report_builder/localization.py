@@ -38,6 +38,12 @@ logger = logging.getLogger("rankberry.report_builder.i18n")
 
 DEFAULT_LANGUAGE = "en"
 
+# Symbol printed next to revenue figures when a client has none set. It is not
+# derived from the language — GA4 reports revenue in the analytics property's
+# currency, which is a per-client fact — so it lives here only because this is
+# the module both the client service and the exporter already import.
+DEFAULT_CURRENCY = "₴"
+
 # Languages a report can be delivered in. English is the language reports are
 # authored in, so it needs no translation pass.
 SUPPORTED_LANGUAGES: dict[str, str] = {

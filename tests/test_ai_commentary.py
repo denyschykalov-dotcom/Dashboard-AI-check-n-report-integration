@@ -113,11 +113,14 @@ class CommentableBlocksTests(unittest.TestCase):
             {"block_type_key": "summary", "status": "ok"},           # written by Opus at submit
             {"block_type_key": "ga4_summary", "status": "ok"},
             {"block_type_key": "gsc_summary", "status": "unavailable"},  # no data
-            {"block_type_key": "ai_visibility_gpt_1mo", "status": "ok"},  # renders inside another section
+            {"block_type_key": "ai_visibility_gpt_1mo", "status": "ok"},   # owns section b15
+            {"block_type_key": "ai_visibility_grok_1mo", "status": "ok"},  # same section, no second box
             {"block_type_key": "ga4_summary", "status": "ok"},       # duplicate
             {"block_type_key": "", "status": "ok"},
         ]
-        self.assertEqual(commentable_block_keys(blocks), ["ga4_summary"])
+        self.assertEqual(
+            commentable_block_keys(blocks), ["ga4_summary", "ai_visibility_gpt_1mo"]
+        )
 
     def test_every_commentable_key_has_a_template_section(self):
         blocks = [{"block_type_key": key, "status": "ok"} for key in report_export.SECTION_BY_KEY]

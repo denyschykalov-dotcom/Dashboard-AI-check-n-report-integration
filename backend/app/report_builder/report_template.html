@@ -451,6 +451,10 @@ const LBL = DATA.meta.LBL;
 // the report opens on.
 const MODES = (DATA.meta.modes && DATA.meta.modes.length) ? DATA.meta.modes : [{id:'mom', label:''}];
 const state = {mode: MODES[0].id};
+// Currency the revenue figures are printed in — a per-client setting, because
+// GA4 reports revenue in its property's own currency.
+const CUR = DATA.meta.currency || '₴';
+const money = n => fnum(n)+' '+CUR, moneyAbbr = n => fabbr(n)+' '+CUR;
 const cmp = ()=> state.mode==='mom' ? P.prev : P.yoy;
 
 // --- customization: report-wide accent, per chart-slot variant, per-panel text ---
@@ -966,8 +970,8 @@ function renderEcom(){
   const cr=c.checkouts?c.purchases/c.checkouts*100:0, crP=p.checkouts?p.purchases/p.checkouts*100:0;
   document.getElementById('ecScore').innerHTML=
     scEl('Number of sales', fnum(c.purchases), deltaHTML(c.purchases,p.purchases))+
-    scEl('Revenue', fabbr(c.revenue)+' ₴', deltaHTML(c.revenue,p.revenue))+
-    scEl('Avg order value', fnum(aov)+' ₴', deltaHTML(aov,aovP))+
+    scEl('Revenue', moneyAbbr(c.revenue), deltaHTML(c.revenue,p.revenue))+
+    scEl('Avg order value', money(aov), deltaHTML(aov,aovP))+
     scEl('Add to cart', fnum(c.addToCart), deltaHTML(c.addToCart,p.addToCart))+
     scEl('Checkout→Purchase', cr.toFixed(1)+'%', ppDelta(cr,crP));
   const ecStages=[{label:'Add to cart',value:c.addToCart},{label:'Checkout',value:c.checkouts},{label:'Purchase',value:c.purchases}];
@@ -978,7 +982,7 @@ function renderEcom(){
      <tr><td>Add to cart</td><td class="r">${fnum(c.addToCart)}</td><td class="r muted">${fnum(p.addToCart)}</td><td class="r">${deltaHTML(c.addToCart,p.addToCart)}</td></tr>
      <tr><td>Checkout</td><td class="r">${fnum(c.checkouts)}</td><td class="r muted">${fnum(p.checkouts)}</td><td class="r">${deltaHTML(c.checkouts,p.checkouts)}</td></tr>
      <tr><td>Number of sales</td><td class="r">${fnum(c.purchases)}</td><td class="r muted">${fnum(p.purchases)}</td><td class="r">${deltaHTML(c.purchases,p.purchases)}</td></tr>
-     <tr><td>Revenue</td><td class="r">${fnum(c.revenue)} ₴</td><td class="r muted">${fnum(p.revenue)} ₴</td><td class="r">${deltaHTML(c.revenue,p.revenue)}</td></tr></tbody></table>`;
+     <tr><td>Revenue</td><td class="r">${money(c.revenue)}</td><td class="r muted">${money(p.revenue)}</td><td class="r">${deltaHTML(c.revenue,p.revenue)}</td></tr></tbody></table>`;
   setSection('ecTable', sectionOn('ecom_detail', true), true);
   renderAiRevenue();
 }
@@ -996,13 +1000,13 @@ function renderAiRevenue(){
   const salesShare=site.purchases?ai.purchases/site.purchases*100:0;
   document.getElementById('aiEcScore').innerHTML=
     scEl('AI number of sales', fnum(ai.purchases), deltaHTML(ai.purchases,aip.purchases), salesShare.toFixed(2)+'% of all sales')+
-    scEl('AI revenue', fabbr(ai.revenue)+' ₴', deltaHTML(ai.revenue,aip.revenue), revShare.toFixed(2)+'% of all revenue')+
-    scEl('AI avg order value', fnum(aov)+' ₴', '')+
+    scEl('AI revenue', moneyAbbr(ai.revenue), deltaHTML(ai.revenue,aip.revenue), revShare.toFixed(2)+'% of all revenue')+
+    scEl('AI avg order value', money(aov), '')+
     scEl('AI add to cart', fnum(ai.addToCart), deltaHTML(ai.addToCart,aip.addToCart));
   document.getElementById('aiEcTable').innerHTML=
     `<table><thead><tr><th>Metric</th><th class="r">${LBL[P.cur]}</th><th class="r">${LBL[cmp()]}</th><th class="r">Change</th></tr></thead><tbody>
      <tr><td>Number of sales</td><td class="r">${fnum(ai.purchases)}</td><td class="r muted">${fnum(aip.purchases)}</td><td class="r">${deltaHTML(ai.purchases,aip.purchases)}</td></tr>
-     <tr><td>Revenue</td><td class="r">${fnum(ai.revenue)} ₴</td><td class="r muted">${fnum(aip.revenue)} ₴</td><td class="r">${deltaHTML(ai.revenue,aip.revenue)}</td></tr>
+     <tr><td>Revenue</td><td class="r">${money(ai.revenue)}</td><td class="r muted">${money(aip.revenue)}</td><td class="r">${deltaHTML(ai.revenue,aip.revenue)}</td></tr>
      <tr><td>Add to cart</td><td class="r">${fnum(ai.addToCart)}</td><td class="r muted">${fnum(aip.addToCart)}</td><td class="r">${deltaHTML(ai.addToCart,aip.addToCart)}</td></tr>
      <tr><td>Checkout</td><td class="r">${fnum(ai.checkouts)}</td><td class="r muted">${fnum(aip.checkouts)}</td><td class="r">${deltaHTML(ai.checkouts,aip.checkouts)}</td></tr></tbody></table>`;
 }
@@ -1022,7 +1026,7 @@ function renderAI(){
     scEl('vs organic search', vsOrg.toFixed(1)+'%', '', 'of organic sessions')+
     (hasSales
       ? scEl('AI sales', fnum(aiEc.purchases), deltaHTML(aiEc.purchases,aiEcP.purchases), 'purchases')+
-        scEl('AI revenue', fabbr(aiEc.revenue)+' ₴', deltaHTML(aiEc.revenue,aiEcP.revenue), 'from AI traffic')
+        scEl('AI revenue', moneyAbbr(aiEc.revenue), deltaHTML(aiEc.revenue,aiEcP.revenue), 'from AI traffic')
       : '');
   if(chartVariant('ai_tools','bars')==='donut') donut(document.getElementById('aiBars'), DATA.aiTools.map(t=>({label:t.source,value:t.sessions})));
   else hbars(document.getElementById('aiBars'), DATA.aiTools.map(t=>({label:t.source,cur:t.sessions,prev:0})));
@@ -1469,14 +1473,15 @@ function applyEditMode(){
   if(!DATA.editable) return;
   buildEditBar();
   Object.keys(SECRENDER).forEach(secId=>{
-    // b1 (hero) has no comment slot; b15 (AI Visibility) spans several block
-    // keys at once, so it has no single key to attach panel customization or
-    // a comment to.
-    if(secId==='b1'||secId==='b15') return;
+    // b1 (hero) has no comment slot.
+    if(secId==='b1') return;
     const sec=document.getElementById(secId); if(!sec) return;
     const st=blockState(secId); if(!st||!st.selected||st.status!=='ok') return;
     const key=KEY_BY_SEC[secId]; if(!key) return;
-    buildPanelToolbar(sec, secId, key);
+    // b15 (AI Visibility) spans several block keys rendered as tabs, so there is
+    // no single panel to customize — but the section still gets one comment box,
+    // written against whichever of those keys resolved first.
+    if(secId!=='b15') buildPanelToolbar(sec, secId, key);
     // b14/b2 are editorial prose edited in place; everything else gets a note box.
     const rawNotes=(DATA.report&&DATA.report.commentsRaw)||{};
     if(secId==='b14'){

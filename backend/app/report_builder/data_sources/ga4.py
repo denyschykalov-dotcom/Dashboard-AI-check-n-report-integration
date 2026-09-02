@@ -308,6 +308,7 @@ def _resolve_ai_traffic(tabs: dict, windows: Windows) -> BlockResult:
     summary_rows = tabs.get("GA4 AI Summary", [])
     tools_rows = periods.window_rows(tabs.get("GA4 AI Traffic", []), windows.current)
     top_pages_rows = periods.window_rows(tabs.get("GA4 AI Top Pages", []), windows.current)
+    ai_ecommerce_rows = tabs.get("GA4 AI Ecommerce", [])
 
     # No rows in any of the three tabs means they were never collected, which is
     # different from a site that genuinely had no AI traffic: that one still gets
@@ -359,6 +360,14 @@ def _resolve_ai_traffic(tabs: dict, windows: Windows) -> BlockResult:
             },
             "tools": tools,
             "top_pages": top_pages,
+            # Sales made by AI-referred visitors. Carried here as well as in the
+            # monetization block, because the AI-Traffic section shows them and a
+            # report can select this block without that one.
+            "ecommerce": {
+                "current": _ecommerce_kpi(periods.window_rows(ai_ecommerce_rows, windows.current)),
+                "previous": _ecommerce_kpi(periods.window_rows(ai_ecommerce_rows, windows.previous)),
+                "yoy": _ecommerce_kpi(periods.window_rows(ai_ecommerce_rows, windows.yoy)),
+            },
         }
     )
 
