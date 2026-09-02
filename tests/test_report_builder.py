@@ -1253,6 +1253,23 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(by_key["intro_header"]["status"], "ok")
         self.assertEqual(by_key["does_not_exist"]["status"], "unavailable")
 
+    def test_generate_keeps_the_specialist_block_order(self) -> None:
+        """The specialist's drag order (block_keys) is the order the blocks come
+        back in, and the order the export renders the sections in."""
+        client = _client(self.session)
+        wanted = ["summary", "search_industry", "intro_header"]
+        result = report_service.generate(self.session, client_id=client.id, block_keys=wanted)
+        self.assertEqual([block["block_type_key"] for block in result["blocks"]], wanted)
+        data = report_export._build_data(
+            period_label="Jun 2026",
+            default_comparison="mom",
+            prepared="2026-07-01",
+            blocks=result["blocks"],
+            client_name="Acme Co",
+            client_domain="acme.test",
+        )
+        self.assertEqual(data["report"]["order"], ["b14", "b2", "b1"])
+
     def test_generate_rejects_empty_selection(self) -> None:
         client = _client(self.session)
         with self.assertRaises(ValueError):

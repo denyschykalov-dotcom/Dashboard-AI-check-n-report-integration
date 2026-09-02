@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from backend.app.models import Client, Report, ReportBlock, Run
 from backend.app.observability import log_event
 from backend.app.report_builder import localization
-from backend.app.report_builder.block_catalog import catalog_as_dicts, get_block
+from backend.app.report_builder.block_catalog import CATALOG_ORDER, catalog_as_dicts, get_block
 from backend.app.report_builder.data_sources import (
     ahrefs,
     ai_visibility,
@@ -278,18 +278,21 @@ def generate(
 
     manual_plan = (planned_work_mode or "clickup").strip().lower() == "manual"
 
-    blocks: list[dict[str, object]] = []
-    for key in block_keys:
+    # ``block_keys`` arrives in the order the specialist arranged the report, which
+    # is *not* a safe resolution order: the period fallback below is seeded by the
+    # first sheet-backed source that resolves, so a ClickUp block dragged to the top
+    # would otherwise filter against today's month. Resolve in catalog order, then
+    # return the blocks in the requested order.
+    resolved: dict[str, dict[str, object]] = {}
+    for key in sorted(block_keys, key=lambda k: CATALOG_ORDER.get(k, len(CATALOG_ORDER))):
         block = get_block(key)
         if block is None:
-            blocks.append(
-                {
-                    "block_type_key": key,
-                    "status": "unavailable",
-                    "data": None,
-                    "unavailable_reason": f"Unknown block type '{key}'.",
-                }
-            )
+            resolved[key] = {
+                "block_type_key": key,
+                "status": "unavailable",
+                "data": None,
+                "unavailable_reason": f"Unknown block type '{key}'.",
+            }
             continue
         started = time.perf_counter()
         if key == "planned_works" and manual_plan:
@@ -326,14 +329,12 @@ def generate(
             period_drift=bool(data_period and data_period != period_label),
             reason=result.unavailable_reason,
         )
-        blocks.append(
-            {
-                "block_type_key": key,
-                "status": result.status,
-                "data": result.data,
-                "unavailable_reason": result.unavailable_reason,
-            }
-        )
+        resolved[key] = {
+            "block_type_key": key,
+            "status": result.status,
+            "data": result.data,
+            "unavailable_reason": result.unavailable_reason,
+        }
         if (
             selection is None
             and result.status == "ok"
@@ -349,6 +350,7 @@ def generate(
             period_label = str(result.data["period"])
             context.period_label = period_label
 
+    blocks = [resolved[key] for key in dict.fromkeys(block_keys) if key in resolved]
     unavailable = sum(1 for block in blocks if block["status"] == "unavailable")
     logger.info(
         "report_generate client_id=%s blocks=%s unavailable=%s",

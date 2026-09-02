@@ -633,10 +633,15 @@ def _build_data(
     block_states: dict[str, dict] = {}
     comments: dict[str, str] = {}
     comments_raw: dict[str, str] = {}
+    # The section order the specialist arranged in the builder — the blocks arrive
+    # in that order, and the template moves its sections to match.
+    section_order: list[str] = []
     for b in blocks:
         sec = SECTION_BY_KEY.get(b.get("block_type_key"))
         if not sec:
             continue
+        if sec not in section_order:
+            section_order.append(sec)
         # Several ai_visibility_* blocks can share section b15 — once any of
         # them resolves ok, a later unavailable one must not downgrade it back.
         existing = block_states.get(sec)
@@ -650,7 +655,12 @@ def _build_data(
         if b.get("comment"):
             comments[sec] = _comment_html(b["comment"])
             comments_raw[sec] = b["comment"]
-    data["report"] = {"blocks": block_states, "comments": comments, "commentsRaw": comments_raw}
+    data["report"] = {
+        "blocks": block_states,
+        "comments": comments,
+        "commentsRaw": comments_raw,
+        "order": section_order,
+    }
     data["customization"] = _normalize_customization(customization)
     data["editable"] = bool(editable)
     data["language"] = lang
@@ -1258,7 +1268,12 @@ def build_report_markdown(
         f"Domain: {meta.get('domain', client_domain)} · Prepared: {meta.get('prepared', prepared)}",
         "",
     ]
-    for sec_id, title, builder in _MD_SECTIONS:
+    # Same section order the HTML export uses (b1, the hero, has no Markdown form).
+    md_sections = {sec_id: (title, builder) for sec_id, title, builder in _MD_SECTIONS}
+    for sec_id in report_chrome.get("order") or []:
+        if sec_id not in md_sections:
+            continue
+        title, builder = md_sections[sec_id]
         state = block_states.get(sec_id)
         if not state or not state.get("selected") or state.get("status") != "ok":
             continue

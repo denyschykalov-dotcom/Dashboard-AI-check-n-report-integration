@@ -1313,6 +1313,14 @@ function paintLabels(){
 }
 const SECRENDER={b1:renderIntro,b2:renderIndustry,b3:renderAhrefs,b4:renderAhMovers,b5:renderGA4,b6:renderLanding,b7:renderEcom,b8:renderAI,b9:renderGSC,b10:renderGscTables,b11:renderSER,b12:()=>taskTable('doneTable',DATA.workDone||[],'work_completed'),b13:renderPlanned,b14:renderSummary,b15:renderAIVisibility};
 function blockState(secId){ return (DATA.report&&DATA.report.blocks&&DATA.report.blocks[secId])||null; }
+// The specialist can drag blocks around in the builder, so the selected sections
+// are re-stacked (in front of the footer) in the order DATA.report.order gives.
+// Sections not in that list are unselected and hidden anyway, so they stay put.
+function applySectionOrder(){
+  const order=(DATA.report&&DATA.report.order)||[];
+  const foot=document.querySelector('.wrap > .foot'); if(!foot||!order.length) return;
+  order.forEach(secId=>{ const sec=document.getElementById(secId); if(sec) foot.parentNode.insertBefore(sec,foot); });
+}
 function applyReportChrome(){
   if(!DATA.report) return;
   Object.keys(SECRENDER).forEach(secId=>{
@@ -1501,7 +1509,7 @@ document.getElementById('modeToggle').addEventListener('click',e=>{ const b=e.ta
   if(b.dataset.mode===state.mode) return;
   state.mode=b.dataset.mode; document.querySelectorAll('#modeToggle button').forEach(x=>x.classList.toggle('on',x===b)); renderAll();});
 window.addEventListener('resize', syncHeaderOffset);
-applyCustomization(); initModeToggle(); renderAll(); applyReportChrome(); wireTabs(); applyEditMode();
+applyCustomization(); initModeToggle(); renderAll(); applySectionOrder(); applyReportChrome(); wireTabs(); applyEditMode();
 // applyReportChrome/applyEditMode inject their own markup (comment boxes, the
 // AI-visibility tabs), so localize once more after the DOM has settled.
 localizeDom();

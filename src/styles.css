@@ -1996,6 +1996,44 @@ th {
   margin: 4px 0 0;
 }
 
+/* Drag-to-reorder list of the selected blocks (the report's section order). */
+.report-order-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.report-order-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 14px;
+  color: var(--text);
+  cursor: grab;
+}
+
+.report-order-item.is-dragging {
+  opacity: 0.5;
+}
+
+.report-order-grip {
+  color: var(--muted);
+}
+
+.report-order-name {
+  flex: 1;
+}
+
+.report-order-move {
+  padding: 0 8px;
+  line-height: 1.6;
+}
+
 .report-timeframe {
   display: flex;
   flex-direction: column;

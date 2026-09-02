@@ -90,8 +90,12 @@ def _ai_visibility_blocks() -> list[BlockType]:
 
 
 # --- 14 baseline blocks (order mirrors the OnebyOne report template) ----------
+# The catalog order is also the report's default section order (the specialist can
+# drag blocks around in the builder), so it must match the section order in
+# ``report_template.html`` — summary right after the hero, and so on.
 _BASELINE_BLOCKS: list[BlockType] = [
     BlockType("intro_header", "Intro / header", "static", "text"),
+    BlockType("summary", "Summary", "editorial", "text"),
     BlockType("search_industry", "Search industry", "editorial", "text"),
     BlockType("ahrefs_domain_analysis", "Ahrefs — Domain analysis", "ahrefs", "table"),
     BlockType("ahrefs_top_movers", "Ahrefs — Top movers (pages & keywords)", "ahrefs", "table"),
@@ -104,7 +108,6 @@ _BASELINE_BLOCKS: list[BlockType] = [
     BlockType("se_ranking_keywords", "SE Ranking — Tracked keywords", "se_ranking", "table"),
     BlockType("work_completed", "Work completed", "clickup", "list"),
     BlockType("planned_works", "Planned works", "clickup", "list"),
-    BlockType("summary", "Summary", "editorial", "text"),
 ]
 
 # --- retired: 2 bar-chart variants of the donut baseline blocks ---------------
@@ -123,10 +126,17 @@ _RETIRED_BLOCKS: list[BlockType] = [
 RETIRED_BLOCK_KEYS: frozenset[str] = frozenset(block.key for block in _RETIRED_BLOCKS)
 
 # What a specialist can put in a report. Retired blocks are deliberately absent.
-BLOCK_CATALOG: list[BlockType] = [
-    *_BASELINE_BLOCKS,
-    *_ai_visibility_blocks(),
-]
+# The AI-visibility variants are spliced in where their shared section (b15) sits
+# in the template, so the catalog order stays the report's section order.
+def _catalog() -> list[BlockType]:
+    at = [block.key for block in _BASELINE_BLOCKS].index("ga4_ai_traffic") + 1
+    return [*_BASELINE_BLOCKS[:at], *_ai_visibility_blocks(), *_BASELINE_BLOCKS[at:]]
+
+
+BLOCK_CATALOG: list[BlockType] = _catalog()
+
+# key -> its place in the report's default section order.
+CATALOG_ORDER: dict[str, int] = {block.key: index for index, block in enumerate(BLOCK_CATALOG)}
 
 # Lookup covers retired blocks too, so resolving an old report still works.
 _BLOCK_BY_KEY: dict[str, BlockType] = {
