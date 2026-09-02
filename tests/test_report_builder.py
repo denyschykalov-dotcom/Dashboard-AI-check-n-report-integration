@@ -447,6 +447,68 @@ class GA4SheetResolverTests(unittest.TestCase):
         self.assertEqual(result.data["ai"]["previous"]["purchases"], 31)
         self.assertEqual(result.data["ai"]["yoy"]["purchases"], 5)
 
+    def test_ai_sales_use_the_rollup_row_not_the_sum_of_every_source(self) -> None:
+        """A per-source AI ecommerce tab lists each assistant *and* a total row.
+
+        Summing the window counted every sale twice — once under the assistant,
+        once under "ALL AI ASSISTANTS".
+        """
+        fixture = _ga4_sheet_fixture()
+        fixture["GA4 AI Ecommerce"] = [
+            ["Period", "Source", "Purchases", "Revenue", "Currency", "Add to Carts", "Checkouts"],
+            ["Jun 2026", "ALL AI ASSISTANTS", "42", "185000.50", "USD", "260", "70"],
+            ["Jun 2026", "chatgpt.com", "30", "140000.00", "USD", "180", "50"],
+            ["Jun 2026", "perplexity.ai", "12", "45000.50", "USD", "80", "20"],
+        ]
+        with _patched_ga4_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = ga4.resolve(get_block("ga4_monetization"), self._context())
+        current = result.data["ai"]["current"]
+        self.assertEqual(current["purchases"], 42)
+        self.assertAlmostEqual(current["revenue"], 185000.50)
+        self.assertEqual(current["add_to_carts"], 260)
+        self.assertEqual(current["checkouts"], 70)
+
+    def test_ai_sales_still_sum_the_rollup_across_a_multi_month_window(self) -> None:
+        """One roll-up row per month — those do still add up."""
+        rows = [
+            {"Period": "Jun 2026", "Source": "ALL AI ASSISTANTS", "Purchases": "42", "Revenue": "100"},
+            {"Period": "May 2026", "Source": "ALL AI ASSISTANTS", "Purchases": "31", "Revenue": "50"},
+            {"Period": "Jun 2026", "Source": "chatgpt.com", "Purchases": "30", "Revenue": "90"},
+        ]
+        kpi = ga4._ecommerce_kpi(rows)
+        self.assertEqual(kpi["purchases"], 73)
+        self.assertAlmostEqual(kpi["revenue"], 150.0)
+
+    def test_a_tab_without_a_source_column_is_summed_as_before(self) -> None:
+        rows = [
+            {"Period": "Jun 2026", "Purchases": "10", "Revenue": "5"},
+            {"Period": "May 2026", "Purchases": "20", "Revenue": "7"},
+        ]
+        self.assertEqual(ga4._ecommerce_kpi(rows)["purchases"], 30)
+
+    def test_the_rollup_row_is_not_charted_as_an_ai_tool(self) -> None:
+        fixture = _ga4_sheet_fixture()
+        fixture["GA4 AI Traffic"] = [
+            ["Period", "Source", "Sessions", "Engaged Sessions"],
+            ["Jun 2026", "ALL AI ASSISTANTS", "1057", "800"],
+            ["Jun 2026", "chatgpt.com", "1000", "760"],
+            ["Jun 2026", "perplexity.ai", "57", "40"],
+        ]
+        with _patched_ga4_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = ga4.resolve(get_block("ga4_ai_traffic"), self._context())
+        sources = [tool["source"] for tool in result.data["tools"]]
+        self.assertEqual(sources, ["chatgpt.com", "perplexity.ai"])
+
+    def test_a_rollup_only_traffic_tab_still_charts_its_one_row(self) -> None:
+        fixture = _ga4_sheet_fixture()
+        fixture["GA4 AI Traffic"] = [
+            ["Period", "Source", "Sessions", "Engaged Sessions"],
+            ["Jun 2026", "ALL AI ASSISTANTS", "1057", "800"],
+        ]
+        with _patched_ga4_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = ga4.resolve(get_block("ga4_ai_traffic"), self._context())
+        self.assertEqual([t["source"] for t in result.data["tools"]], ["ALL AI ASSISTANTS"])
+
     def test_monetization_reads_the_currency_off_the_sheet(self) -> None:
         with _patched_ga4_sheet():
             result = ga4.resolve(get_block("ga4_monetization"), self._context())

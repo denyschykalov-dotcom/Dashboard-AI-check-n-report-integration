@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import typing
 
+import re
+
 from backend.app.report_builder import localization
 from backend.app.report_builder.block_catalog import BlockType
 from backend.app.report_builder.data_sources import periods
@@ -133,9 +135,32 @@ def _summary_kpi(rows: list[dict[str, str]]) -> typing.Optional[dict[str, object
     }
 
 
+# The roll-up row of a per-source AI tab. Such a tab lists one row per assistant
+# *and* this total, so summing the whole thing counts every sale twice — once
+# under ChatGPT/Perplexity/…, once under the total.
+_ALL_AI_SOURCE = "all ai assistants"
+
+
+def _source_label(row: dict[str, str]) -> str:
+    return re.sub(r"\s+", " ", str(row.get("Source") or "")).strip().lower()
+
+
+def _rollup_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """A per-source tab's "ALL AI ASSISTANTS" rows, else the rows unchanged.
+
+    Returned as a list, not one row: a multi-month window holds one roll-up row
+    per month and those do still need summing. A tab with no Source column, or
+    one with no roll-up row in it, is passed through — there is nothing to
+    double-count.
+    """
+    rollup = [row for row in rows if _source_label(row) == _ALL_AI_SOURCE]
+    return rollup or rows
+
+
 def _ecommerce_kpi(rows: list[dict[str, str]]) -> typing.Optional[dict[str, object]]:
     if not rows:
         return None
+    rows = _rollup_rows(rows)
     return {
         "purchases": periods.sum_int(rows, "Purchases"),
         "revenue": periods.sum_float(rows, "Revenue"),
@@ -163,6 +188,9 @@ def _currency_of(*row_groups: list[dict[str, str]]) -> str:
 def _ai_summary_kpi(rows: list[dict[str, str]]) -> typing.Optional[dict[str, object]]:
     if not rows:
         return None
+    # Same roll-up trap as the ecommerce tabs: a summary tab broken out by source
+    # would otherwise report double the sessions.
+    rows = _rollup_rows(rows)
     single = len(rows) == 1
     sessions = periods.sum_int(rows, "Total AI Sessions")
     engaged = periods.sum_int(rows, "Engaged Sessions")
@@ -347,6 +375,13 @@ def _resolve_ai_traffic(tabs: dict, windows: Windows) -> BlockResult:
             f"{windows.current.display} — it needs the tabs "
             "'GA4 AI Summary', 'GA4 AI Traffic' and 'GA4 AI Top Pages'."
         )
+
+    # The per-assistant breakdown is the one place the roll-up row must be left
+    # out rather than preferred: charted alongside the assistants it totals, it
+    # reads as an assistant called "ALL AI ASSISTANTS" twice the size of the rest.
+    # Kept when it is the only row there, so a roll-up-only tab still charts.
+    named_tools = [row for row in tools_rows if _source_label(row) != _ALL_AI_SOURCE]
+    tools_rows = named_tools or tools_rows
 
     tools = sorted(
         (
