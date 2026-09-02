@@ -1595,6 +1595,83 @@ class ClickUpClientMatchTests(unittest.TestCase):
         self.assertIsNone(self._find("Totally Unrelated", "nowhere-at-all.io"))
 
 
+class ClickUpTransportRetryTests(unittest.TestCase):
+    """A flaky connection gets one more go; a real refusal does not.
+
+    From a live report: "Could not reach ClickUp: _ssl.c:1120: The handshake
+    operation timed out" killed Work completed and Planned works at once. Only
+    429 was retried, so one bad connection out of dozens lost the section.
+    """
+
+    def _ok(self, body=None):
+        return SimpleNamespace(
+            status_code=200, content=b"{}", text="{}", headers={},
+            json=lambda: (body if body is not None else {"teams": []}),
+        )
+
+    def _call(self, responses):
+        calls = {"n": 0}
+
+        def fake_get(*args, **kwargs):
+            result = responses[calls["n"]]
+            calls["n"] += 1
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with patch("httpx.get", side_effect=fake_get), \
+             patch.object(clickup_client_module.time, "sleep"):
+            try:
+                return clickup_client_module._get("tok", "team"), calls["n"]
+            except ClickUpAccessError as error:
+                return error, calls["n"]
+
+    def test_a_handshake_timeout_is_retried_once_and_can_succeed(self) -> None:
+        out, calls = self._call([
+            httpx.ConnectTimeout("_ssl.c:1120: The handshake operation timed out"),
+            self._ok({"teams": [{"id": "1"}]}),
+        ])
+        self.assertEqual(out, {"teams": [{"id": "1"}]})
+        self.assertEqual(calls, 2)
+
+    def test_a_read_timeout_is_retried_once(self) -> None:
+        out, calls = self._call([
+            httpx.ReadTimeout("The read operation timed out"),
+            self._ok(),
+        ])
+        self.assertEqual(out, {"teams": []})
+        self.assertEqual(calls, 2)
+
+    def test_it_gives_up_after_the_retry_and_says_what_happened(self) -> None:
+        out, calls = self._call([
+            httpx.ReadTimeout("The read operation timed out"),
+            httpx.ReadTimeout("The read operation timed out"),
+        ])
+        self.assertIsInstance(out, ClickUpAccessError)
+        self.assertIn("Could not reach ClickUp", str(out))
+        self.assertEqual(calls, 2)
+
+    def test_a_bad_token_is_not_retried(self) -> None:
+        bad = SimpleNamespace(status_code=401, content=b"", text="", headers={}, json=lambda: {})
+        out, calls = self._call([bad])
+        self.assertIsInstance(out, ClickUpAccessError)
+        self.assertEqual(calls, 1)
+
+    def test_a_timeout_then_a_rate_limit_both_get_their_own_retry(self) -> None:
+        """The two budgets are separate: one flaky connection must not spend the
+        429 retry that a burst still needs."""
+        limited = SimpleNamespace(
+            status_code=429, content=b"", text="", headers={"Retry-After": "1"}, json=lambda: {}
+        )
+        out, calls = self._call([
+            httpx.ReadTimeout("timed out"),
+            limited,
+            self._ok({"teams": [{"id": "9"}]}),
+        ])
+        self.assertEqual(out, {"teams": [{"id": "9"}]})
+        self.assertEqual(calls, 3)
+
+
 class ClickUpIterAllListsTests(unittest.TestCase):
     """_iter_all_lists must also surface lists shared with the token via the
     "Shared with me" hierarchy, which lives outside the team's own space tree."""

@@ -29,27 +29,57 @@ _RATE_LIMIT_RETRIES = 1
 _RATE_LIMIT_DEFAULT_WAIT_S = 5.0
 _RATE_LIMIT_MAX_WAIT_S = 30.0
 
+# One retry for a connection that never got off the ground — a TLS handshake or
+# a read that timed out. Seen in a real report as two dead sections at once:
+# "Could not reach ClickUp: _ssl.c:1120: The handshake operation timed out" and
+# "Could not reach ClickUp: The read operation timed out". One report makes
+# dozens of sequential calls (the whole workspace tree, then one per DONE task),
+# so a single flaky connection out of dozens took a whole section down.
+_TRANSPORT_RETRIES = 1
+_TRANSPORT_RETRY_WAIT_S = 2.0
+
+# Split so a stalled connection is given up on quickly while a slow-but-alive
+# response still gets its time. The old single 30s value meant a dead connection
+# burned 30 seconds before anyone found out.
+_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
 
 class ClickUpAccessError(Exception):
     """Raised for any expected, handled failure to read ClickUp data."""
 
 
 def _get(token: str, path: str, params: typing.Optional[dict] = None) -> dict:
-    """One ClickUp GET, retrying a 429 once after the rate-limit window.
+    """One ClickUp GET, retried once for a 429 and once for a transport failure.
 
-    A single report can make one call per DONE task on top of the list read, so
-    a burst brushing ClickUp's ~100/min ceiling is a normal occurrence rather
-    than an exceptional one — worth riding out instead of failing the block.
+    A single report can make one call per DONE task on top of the workspace
+    traversal, so both a burst brushing ClickUp's ~100/min ceiling and one flaky
+    connection out of dozens are normal occurrences rather than exceptional
+    ones — worth riding out instead of failing the block.
     """
     url = f"{_API_BASE}/{path.lstrip('/')}"
-    for attempt in range(_RATE_LIMIT_RETRIES + 1):
+    attempts = _RATE_LIMIT_RETRIES + _TRANSPORT_RETRIES + 1
+    rate_limit_retries = _RATE_LIMIT_RETRIES
+    transport_retries = _TRANSPORT_RETRIES
+    for _ in range(attempts):
         with external_call(logger, "clickup", path) as call:
             try:
                 response = httpx.get(
-                    url, headers={"Authorization": token}, params=params or {}, timeout=30.0
+                    url, headers={"Authorization": token}, params=params or {}, timeout=_TIMEOUT
                 )
             except httpx.HTTPError as error:
-                raise ClickUpAccessError(f"Could not reach ClickUp: {error}") from error
+                if transport_retries <= 0:
+                    raise ClickUpAccessError(f"Could not reach ClickUp: {error}") from error
+                transport_retries -= 1
+                # Recorded on this call's own log line, so a retried request is
+                # visible rather than looking like a clean call.
+                call["outcome_detail"] = "transport_error_retried"
+                call["error"] = str(error)[:200]
+                log_event(
+                    logger, "clickup_transport_retry", level=logging.WARNING,
+                    path=path, error=str(error)[:200], retry_in_s=_TRANSPORT_RETRY_WAIT_S,
+                )
+                time.sleep(_TRANSPORT_RETRY_WAIT_S)
+                continue
             call["status"] = response.status_code
             call["bytes"] = len(response.content or b"")
 
@@ -58,10 +88,11 @@ def _get(token: str, path: str, params: typing.Optional[dict] = None) -> dict:
             if response.status_code == 403:
                 raise ClickUpAccessError("ClickUp token has no access to that resource (403).")
             if response.status_code == 429:
-                if attempt >= _RATE_LIMIT_RETRIES:
+                if rate_limit_retries <= 0:
                     raise ClickUpAccessError(
                         "ClickUp API rate limit reached (429) — try again later."
                     )
+                rate_limit_retries -= 1
                 delay = _retry_after_seconds(response)
                 log_event(
                     logger, "clickup_rate_limited", level=logging.WARNING,
