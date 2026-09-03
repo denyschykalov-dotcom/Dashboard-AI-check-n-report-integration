@@ -79,6 +79,20 @@ const SUMMARY_BLOCK_KEY = "summary";
 const SEARCH_INDUSTRY_BLOCK_KEY = "search_industry";
 
 /**
+ * The report as it currently stands: `keys` (the ticked blocks, in list order)
+ * picked out of `blocks` (everything that has been generated).
+ *
+ * Generated data is kept even for a block that is unticked, so unticking one
+ * removes it from the report and re-ticking it brings it straight back — no
+ * regeneration, no lost comment.
+ */
+function orderBlocks(blocks: GeneratedBlock[], keys: string[]): GeneratedBlock[] {
+  return keys
+    .map((key) => blocks.find((block) => block.block_type_key === key))
+    .filter((block): block is GeneratedBlock => Boolean(block));
+}
+
+/**
  * The month the metric blocks actually carry.
  *
  * Sheet-backed resolvers report the period they found, which is the newest month
@@ -214,6 +228,13 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
   const orderedSelection = useMemo(
     () => orderedCatalog.filter((block) => selectedKeys.has(block.key)).map((block) => block.key),
     [orderedCatalog, selectedKeys],
+  );
+
+  // What the preview shows and what a save stores: the generated blocks the
+  // specialist still has ticked, in the order the list puts them.
+  const visibleBlocks = useMemo(
+    () => (generated ? orderBlocks(generated.blocks, orderedSelection) : []),
+    [generated, orderedSelection],
   );
 
   const yearOptions = useMemo(() => {
@@ -434,15 +455,29 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
   }
 
   function toggleBlock(key: string) {
-    setSelectedKeys((current) => {
-      const next = new Set(current);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
+    const next = new Set(selectedKeys);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    setSelectedKeys(next);
+    // Unticking a block has to take it out of the report on screen too —
+    // otherwise it stays in the preview and gets saved, which is how a section
+    // nobody wanted reached a client. Re-ticking one that was generated brings
+    // it back from `generated.blocks` with its comment intact.
+    syncPreview(orderedCatalog.map((block) => block.key).filter((k) => next.has(k)));
+    // Ticking a block that was never generated cannot fill itself in — it has no
+    // data. Silently doing nothing reads as a broken checkbox, so say what is
+    // needed.
+    const needsData =
+      generated &&
+      next.has(key) &&
+      !generated.blocks.some((block) => block.block_type_key === key);
+    if (needsData) {
+      const name = catalog.find((block) => block.key === key)?.display_name ?? key;
+      setStatus(`"${name}" has no data yet — press Generate to fetch it.`);
+    }
   }
 
   /** Move one block to `toIndex` in the block list (= the report's order). */
@@ -453,28 +488,26 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
     keys.splice(from, 1);
     keys.splice(toIndex, 0, key);
     setBlockOrder(keys);
-    reorderPreview(keys);
+    syncPreview(keys.filter((k) => selectedKeys.has(k)));
   }
 
   /**
-   * Re-render the preview in the new section order.
+   * Re-render the preview for a new section order or a new set of ticks.
    *
-   * The block payloads and the comments already live in state (the preview posts
-   * every keystroke up, see the message listener below), so this is a re-render
-   * of what is already on screen: no source is re-fetched, no Claude call is
-   * made, and nothing typed is lost. The reordered blocks go back into
-   * `generated`, so the new order is what a later save stores.
+   * `keys` is the ticked blocks in report order — passed in rather than read off
+   * state, because the state that triggered this has not been applied yet. The
+   * data and the comments are already held (the preview posts every keystroke
+   * up, see the message listener below), so this is a re-render of what is on
+   * screen: no source is re-fetched, no Claude call is made, nothing typed is
+   * lost.
    */
-  function reorderPreview(keys: string[]) {
+  function syncPreview(keys: string[]) {
     if (!generated) return;
-    const rank = new Map(keys.map((key, index) => [key, index]));
-    const at = (key: string) => rank.get(key) ?? Number.MAX_SAFE_INTEGER;
-    const blocks = [...generated.blocks].sort(
-      (left, right) => at(left.block_type_key) - at(right.block_type_key),
+    void refreshPreview(
+      withComments(orderBlocks(generated.blocks, keys), comments),
+      generated,
+      customization,
     );
-    if (blocks.every((block, index) => block === generated.blocks[index])) return;
-    setGenerated({ ...generated, blocks });
-    void refreshPreview(withComments(blocks, comments), generated, customization);
   }
 
   async function handleSaveClickupToken() {
@@ -643,8 +676,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
   }
 
   function blocksForSave(): GeneratedBlock[] {
-    if (!generated) return [];
-    return withComments(generated.blocks, comments);
+    return withComments(visibleBlocks, comments);
   }
 
   // Render the editable preview from an explicit set of blocks. Called at the
@@ -675,9 +707,19 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
         });
         if (response.ok) {
           setPreviewHtml(await response.text());
+          return;
         }
-      } catch {
-        // preview is best-effort; keep the last good render on failure
+        // The render is best-effort — the last good one stays on screen and
+        // nothing typed is lost. But silence here is indistinguishable from
+        // "the button did nothing", which is how a failing preview gets
+        // reported as a broken feature, so say what happened.
+        setError(`Preview did not re-render (HTTP ${response.status}). Your edits are kept.`);
+      } catch (previewError) {
+        setError(
+          `Preview did not re-render (${
+            previewError instanceof Error ? previewError.message : "network error"
+          }). Your edits are kept.`,
+        );
       }
     },
     [token, selectedClientId],
@@ -894,7 +936,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
       // The summary is Opus's job at submit time — a comment redraft leaves it alone.
       const nextComments = { ...comments, ...drafted };
       setComments(nextComments);
-      await refreshPreview(withComments(generated.blocks, nextComments), generated, customization);
+      await refreshPreview(withComments(visibleBlocks, nextComments), generated, customization);
       setStatus("Claude rewrote the section comments.");
     } catch (aiError) {
       setAiNotice(
@@ -955,12 +997,22 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
     setIsSaving(true);
     try {
       // The summary needs a section to render in; add one if it wasn't selected.
-      const hasSummaryBlock = generated.blocks.some(
+      // It goes into the data bag and gets ticked — its place in the report comes
+      // from the block list like every other section's, not from where it was
+      // appended.
+      const hasSummaryBlock = visibleBlocks.some(
         (block) => block.block_type_key === SUMMARY_BLOCK_KEY,
       );
-      const reportBlocks = hasSummaryBlock
+      const dataBlocks = generated.blocks.some(
+        (block) => block.block_type_key === SUMMARY_BLOCK_KEY,
+      )
         ? generated.blocks
         : [...generated.blocks, summaryPlaceholderBlock()];
+      const selectedWithSummary = new Set(selectedKeys).add(SUMMARY_BLOCK_KEY);
+      const reportBlocks = orderBlocks(
+        dataBlocks,
+        orderedCatalog.map((block) => block.key).filter((key) => selectedWithSummary.has(key)),
+      );
       let finalComments = comments;
 
       setAiStage("summary");
@@ -980,8 +1032,8 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
         finalComments = { ...comments, [SUMMARY_BLOCK_KEY]: response.summary };
         setComments(finalComments);
         if (!hasSummaryBlock) {
-          setGenerated({ ...generated, blocks: reportBlocks });
-          setSelectedKeys((current) => new Set(current).add(SUMMARY_BLOCK_KEY));
+          setGenerated({ ...generated, blocks: dataBlocks });
+          setSelectedKeys(selectedWithSummary);
         }
         // Show the specialist the summary that is about to be saved.
         await refreshPreview(
