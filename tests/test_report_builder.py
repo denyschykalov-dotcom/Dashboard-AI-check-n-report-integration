@@ -36,6 +36,7 @@ from backend.app.report_builder.data_sources.clickup_client import ClickUpAccess
 from backend.app.report_builder.data_sources.base import ResolveContext
 from backend.app.report_builder.data_sources.sheets_client import (
     SheetsAccessError,
+    fetch_tab_values,
     find_client_sheet_id,
     resolve_client_sheet_id,
     resolve_periods,
@@ -679,6 +680,51 @@ class GSCSheetResolverTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.data["kpis"]["current"]["clicks"], 35907)
         self.assertEqual(result.data["branded"]["total_clicks"], 7763 + 468 + 300)
+
+
+class SheetsClientRetryTests(unittest.TestCase):
+    """A 503 from Google used to empty a section of the finished report."""
+
+    def _response(self, status_code, payload=None):
+        response = MagicMock()
+        response.status_code = status_code
+        response.content = b""
+        response.json.return_value = payload or {}
+        return response
+
+    @contextmanager
+    def _patched(self, responses):
+        with patch("backend.app.report_builder.data_sources.sheets_client._get_token", return_value="tok"), \
+             patch("backend.app.report_builder.data_sources.sheets_client.time.sleep"), \
+             patch("httpx.get", side_effect=responses) as mocked_get:
+            yield mocked_get
+
+    def test_a_503_is_retried_and_the_data_still_arrives(self) -> None:
+        ok = self._response(200, {"valueRanges": [{"values": [["Period"], ["Jun 2026"]]}]})
+        with self._patched([self._response(503), ok]) as mocked_get:
+            result = fetch_tab_values("sheet-1", ["GA4 Summary"])
+        self.assertEqual(result["GA4 Summary"], [["Period"], ["Jun 2026"]])
+        self.assertEqual(mocked_get.call_count, 2)
+
+    def test_a_transport_failure_is_retried_too(self) -> None:
+        ok = self._response(200, {"valueRanges": [{"values": [["Period"]]}]})
+        with self._patched([httpx.ReadTimeout("timed out"), ok]) as mocked_get:
+            result = fetch_tab_values("sheet-1", ["GA4 Summary"])
+        self.assertEqual(result["GA4 Summary"], [["Period"]])
+        self.assertEqual(mocked_get.call_count, 2)
+
+    def test_it_gives_up_after_three_attempts_and_says_what_happened(self) -> None:
+        with self._patched([self._response(503)] * 3) as mocked_get:
+            with self.assertRaises(SheetsAccessError) as raised:
+                fetch_tab_values("sheet-1", ["GA4 Summary"])
+        self.assertIn("503", str(raised.exception))
+        self.assertEqual(mocked_get.call_count, 3)
+
+    def test_a_permanent_failure_is_not_retried(self) -> None:
+        with self._patched([self._response(403)]) as mocked_get:
+            with self.assertRaises(SheetsAccessError):
+                fetch_tab_values("sheet-1", ["GA4 Summary"])
+        self.assertEqual(mocked_get.call_count, 1)
 
 
 class SheetsClientDriveTests(unittest.TestCase):

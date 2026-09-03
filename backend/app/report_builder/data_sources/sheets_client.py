@@ -18,6 +18,7 @@ from functools import lru_cache
 
 import logging
 import re
+import time
 
 import httpx
 
@@ -40,6 +41,46 @@ _SCOPES = [
 
 class SheetsAccessError(Exception):
     """Raised for any expected, handled failure to read a client's sheet."""
+
+
+# Sheets and Drive answer 503 ("The service is currently unavailable") for a
+# second or two under load, and a rate limit is a 429. Without a retry that
+# lands in the finished report as a permanently empty section — the specialist's
+# only recourse being to regenerate the whole report. Two extra attempts, short
+# delays: this runs inside the generate call somebody is waiting on. Permanent
+# failures (404, 403) are not in the set, so they still fail on the first try.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_RETRY_ATTEMPTS = 3
+_RETRY_DELAY_SECONDS = 1.0
+
+
+def _get_with_retry(
+    url: str,
+    *,
+    headers: dict[str, str],
+    params: dict[str, typing.Any],
+    timeout: float = 20.0,
+) -> httpx.Response:
+    """One Google API GET, retried over transient failures.
+
+    The final attempt is returned (or its transport error raised) as-is, so each
+    caller keeps its own status handling and its own error wording.
+    """
+    for attempt in range(1, _RETRY_ATTEMPTS):
+        try:
+            response = httpx.get(url, headers=headers, params=params, timeout=timeout)
+            if response.status_code not in _RETRY_STATUSES:
+                return response
+            reason: object = response.status_code
+        except httpx.HTTPError as error:
+            reason = str(error)[:200]
+        delay = _RETRY_DELAY_SECONDS * attempt
+        logger.warning(
+            "sheets_retrying url=%s after=%s delay_s=%s attempt=%s",
+            url, reason, delay, attempt,
+        )
+        time.sleep(delay)
+    return httpx.get(url, headers=headers, params=params, timeout=timeout)
 
 
 def _resolve_credentials_path(raw_path: str) -> str:
@@ -87,11 +128,10 @@ def fetch_tab_values(sheet_id: str, tab_names: list[str]) -> dict[str, list[list
     with external_call(logger, "google_sheets", "values.batchGet",
                        sheet_id=sheet_id, tabs=len(tab_names)) as call:
         try:
-            response = httpx.get(
+            response = _get_with_retry(
                 url,
                 headers={"Authorization": f"Bearer {token}"},
                 params={"ranges": ranges},
-                timeout=20.0,
             )
         except httpx.HTTPError as error:
             raise SheetsAccessError(f"Could not reach Google Sheets: {error}") from error
@@ -129,11 +169,10 @@ def list_sheet_tabs(sheet_id: str) -> set[str]:
     url = f"{_SHEETS_API_BASE}/{sheet_id}"
     with external_call(logger, "google_sheets", "spreadsheets.get", sheet_id=sheet_id) as call:
         try:
-            response = httpx.get(
+            response = _get_with_retry(
                 url,
                 headers={"Authorization": f"Bearer {token}"},
                 params={"fields": "sheets.properties.title"},
-                timeout=20.0,
             )
         except httpx.HTTPError as error:
             raise SheetsAccessError(f"Could not reach Google Sheets: {error}") from error
@@ -194,11 +233,10 @@ def find_client_sheet_id(folder_id: str, *, name: str, domain: str) -> typing.Op
     )
     with external_call(logger, "google_drive", "files.list", folder_id=folder_id) as call:
         try:
-            response = httpx.get(
+            response = _get_with_retry(
                 _DRIVE_API_BASE,
                 headers={"Authorization": f"Bearer {token}"},
                 params={"q": query, "fields": "files(id,name,modifiedTime)", "pageSize": 200},
-                timeout=20.0,
             )
         except httpx.HTTPError as error:
             raise SheetsAccessError(f"Could not reach Google Drive: {error}") from error
