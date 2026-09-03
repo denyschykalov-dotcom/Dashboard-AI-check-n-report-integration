@@ -861,6 +861,46 @@ class AhrefsResolverTests(unittest.TestCase):
         self.assertEqual(result.data["gainers"][0]["position_prev"], 5)
         self.assertIn("losers", result.data)
 
+    def test_a_month_is_pulled_once_and_reused_by_later_reports(self) -> None:
+        """The persistent cache: a second report for the same month costs no units.
+
+        Both Ahrefs blocks are snapshots of a finished month, so the eight calls
+        (~2,300 API units) must happen once, not on every regenerate.
+        """
+        with patch(
+            "backend.app.report_builder.data_sources.ahrefs.ahrefs_client.get",
+            side_effect=self._fake_get,
+        ) as mocked:
+            first_domain = ahrefs.resolve(get_block("ahrefs_domain_analysis"), self._context())
+            first_movers = ahrefs.resolve(get_block("ahrefs_top_movers"), self._context())
+            calls = mocked.call_count
+            # A separate generate call — a fresh context, so only the stored
+            # payload can answer it.
+            again_domain = ahrefs.resolve(get_block("ahrefs_domain_analysis"), self._context())
+            again_movers = ahrefs.resolve(get_block("ahrefs_top_movers"), self._context())
+
+        self.assertEqual(calls, 8)
+        self.assertEqual(mocked.call_count, 8)
+        self.assertEqual(again_domain.data, first_domain.data)
+        self.assertEqual(again_movers.data, first_movers.data)
+
+    def test_a_failed_pull_is_not_cached(self) -> None:
+        """A rate limit must not be stored as this month's answer."""
+        with patch(
+            "backend.app.report_builder.data_sources.ahrefs.ahrefs_client.get",
+            side_effect=AhrefsAccessError("rate limited", retryable=True),
+        ):
+            failed = ahrefs.resolve(get_block("ahrefs_domain_analysis"), self._context())
+        self.assertEqual(failed.status, "unavailable")
+
+        with patch(
+            "backend.app.report_builder.data_sources.ahrefs.ahrefs_client.get",
+            side_effect=self._fake_get,
+        ) as mocked:
+            retried = ahrefs.resolve(get_block("ahrefs_domain_analysis"), self._context())
+        self.assertEqual(retried.status, "ok")
+        self.assertTrue(mocked.call_count)
+
     def test_unavailable_without_domain(self) -> None:
         client = _client(self.session, name="No Domain", domain="")
         context = ResolveContext(client=client, period_label="", now=utcnow(), session=self.session)

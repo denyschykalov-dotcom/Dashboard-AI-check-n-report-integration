@@ -10,6 +10,10 @@ Resolves from ``client.domain`` via the Ahrefs API v3 (Site Explorer):
   month (``top-pages`` with ``date_compared``).
 
 Any missing domain or API failure resolves ``unavailable`` (spec FR-006).
+
+Both blocks read through ``api_cache``: Ahrefs bills per request (~2,300 units
+for one report) and these are snapshots of a finished month, so the pull is
+stored and reused instead of paid for again on every regenerate.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import typing
 
 from datetime import date
 
+from backend.app.report_builder import api_cache
 from backend.app.report_builder.block_catalog import BlockType
 from backend.app.report_builder.data_sources import ahrefs_client
 from backend.app.report_builder.data_sources.ahrefs_client import AhrefsAccessError, ReportDates
@@ -32,6 +37,11 @@ from backend.app.report_builder.data_sources.base import BlockResult, ResolveCon
 # subdomain the two modes return identical numbers.
 _MODE = "subdomains"  # cover root + www + all paths on the domain
 _MOVERS_LIMIT = 20
+# How long one pull serves. A finished month's snapshot does not move, so this is
+# only bounded by Ahrefs occasionally revising recent data.
+# ponytail: no manual purge — a stale entry waits out the TTL. Add a "refresh
+# from Ahrefs" control if a specialist ever needs to force a re-pull sooner.
+_CACHE_TTL_DAYS = api_cache.DEFAULT_TTL_DAYS
 _MOVERS_SELECT = ",".join(
     [
         "url",
@@ -83,6 +93,21 @@ def _load_domain_analysis(context: ResolveContext, dates: ReportDates) -> dict[s
 
     target = context.client.domain
 
+    def build() -> dict[str, object]:
+        return _fetch_domain_analysis(target, dates)
+
+    result = api_cache.get_or_fetch(
+        context.session,
+        f"ahrefs:v1:domain_analysis:{target}:{dates.current.isoformat()}:{_MODE}",
+        build,
+        ttl_days=_CACHE_TTL_DAYS,
+    )
+    context.cache[cache_key] = result
+    return result
+
+
+def _fetch_domain_analysis(target: str, dates: ReportDates) -> dict[str, object]:
+    """The six Site Explorer calls behind the Domain analysis block (~824 units)."""
     dr_payload = ahrefs_client.get(
         "domain-rating", {"target": target, "date": dates.current.isoformat()}
     ).get("domain_rating", {}) or {}
@@ -109,7 +134,7 @@ def _load_domain_analysis(context: ResolveContext, dates: ReportDates) -> dict[s
         for point in history
     ]
 
-    result = {
+    return {
         "period": dates.current_label,
         "previous_period": dates.previous_label,
         "yoy_period": dates.yoy_label,
@@ -128,8 +153,6 @@ def _load_domain_analysis(context: ResolveContext, dates: ReportDates) -> dict[s
         },
         "trend": trend,
     }
-    context.cache[cache_key] = result
-    return result
 
 
 def _movers(target: str, dates: ReportDates, order_by: str) -> list[dict[str, object]]:
@@ -167,12 +190,22 @@ def _load_top_movers(context: ResolveContext, dates: ReportDates) -> dict[str, o
     if cache_key in context.cache:
         return context.cache[cache_key]
     target = context.client.domain
-    result = {
-        "period": dates.current_label,
-        "previous_period": dates.previous_label,
-        "gainers": _movers(target, dates, "traffic_diff:desc"),
-        "losers": _movers(target, dates, "traffic_diff:asc"),
-    }
+
+    def build() -> dict[str, object]:
+        # Two top-pages calls, the report's most expensive pull (~1,440 units).
+        return {
+            "period": dates.current_label,
+            "previous_period": dates.previous_label,
+            "gainers": _movers(target, dates, "traffic_diff:desc"),
+            "losers": _movers(target, dates, "traffic_diff:asc"),
+        }
+
+    result = api_cache.get_or_fetch(
+        context.session,
+        f"ahrefs:v1:top_movers:{target}:{dates.current.isoformat()}:{_MODE}:{_MOVERS_LIMIT}",
+        build,
+        ttl_days=_CACHE_TTL_DAYS,
+    )
     context.cache[cache_key] = result
     return result
 

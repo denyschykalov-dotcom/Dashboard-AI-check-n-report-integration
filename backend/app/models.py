@@ -157,6 +157,23 @@ class UserSettings(Base):
     )
 
 
+class ApiCache(Base):
+    """One stored external-API payload, keyed by what was asked for.
+
+    Only for data that cannot change once pulled — see
+    ``report_builder.api_cache`` for what qualifies and why.
+    """
+
+    __tablename__ = "Dashboard_ReportBuilder_api_cache"
+
+    cache_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), default=utcnow
+    )
+
+
 class ReportSelection(Base):
     """The last-used block selection and timeframe for a (user, client) pair, so
     reopening a client's report starting point restores the previous checkboxes.
