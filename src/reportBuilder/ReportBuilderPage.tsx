@@ -453,6 +453,28 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
     keys.splice(from, 1);
     keys.splice(toIndex, 0, key);
     setBlockOrder(keys);
+    reorderPreview(keys);
+  }
+
+  /**
+   * Re-render the preview in the new section order.
+   *
+   * The block payloads and the comments already live in state (the preview posts
+   * every keystroke up, see the message listener below), so this is a re-render
+   * of what is already on screen: no source is re-fetched, no Claude call is
+   * made, and nothing typed is lost. The reordered blocks go back into
+   * `generated`, so the new order is what a later save stores.
+   */
+  function reorderPreview(keys: string[]) {
+    if (!generated) return;
+    const rank = new Map(keys.map((key, index) => [key, index]));
+    const at = (key: string) => rank.get(key) ?? Number.MAX_SAFE_INTEGER;
+    const blocks = [...generated.blocks].sort(
+      (left, right) => at(left.block_type_key) - at(right.block_type_key),
+    );
+    if (blocks.every((block, index) => block === generated.blocks[index])) return;
+    setGenerated({ ...generated, blocks });
+    void refreshPreview(withComments(blocks, comments), generated, customization);
   }
 
   async function handleSaveClickupToken() {
