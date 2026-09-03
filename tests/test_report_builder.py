@@ -2212,6 +2212,9 @@ class TaskTableExportTests(unittest.TestCase):
         doc = report_export.build_report_html(report_row, blocks, client_name="Acme Co", client_domain="acme.com")
         raw = _re.search(r"window\.DATA=(\{.*?\});</script>", doc, _re.DOTALL).group(1)
         raw = raw.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+        # The browser-tab title is this report's, not the client the template was
+        # first drawn for.
+        self.assertIn("<title>Acme Co — SEO Report — June 2026</title>", doc)
         data = _json.loads(raw)
         rows = data["workDone"]
         # [task, id] and nothing else: the ClickUp description and the tracked
