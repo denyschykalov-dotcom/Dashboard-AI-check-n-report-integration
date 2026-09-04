@@ -468,7 +468,7 @@ const cmpBucket = (byPeriod, cur) => (byPeriod && byPeriod[cmp()]) || zeroLike(c
 // does not exist), so they check this instead.
 const hasCmp = () => cmp() != null;
 const NO_DELTA = '<span class="faint small">—</span>';
-if(!LBL[cmp()]) LBL[cmp()] = '—';  // ...and don't print "undefined" as its caption
+if(cmp() == null) LBL[cmp()] = '—';  // ...and don't print "undefined" as its caption
 
 // --- customization: report-wide accent, per chart-slot variant, per-panel text ---
 const CUS = DATA.customization || {charts:{}, panels:{}, accent:null};

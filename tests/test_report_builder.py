@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import re
@@ -762,6 +763,66 @@ class GSCSheetResolverTests(unittest.TestCase):
         keys = {row.cache_key for row in self.session.query(ApiCache).all()}
         self.assertTrue(any("Jun 2026" in k for k in keys), keys)
         self.assertTrue(any("May 2026" in k for k in keys), keys)
+
+    def test_top_queries_does_not_pay_for_a_brand_lookup_it_never_uses(self) -> None:
+        calls = []
+
+        def spy(_self, prompt, *, model, schema):
+            calls.append(model)
+            return {"brand_name": "x", "brand_terms": []}, None
+
+        fixture = _gsc_sheet_fixture()
+        with patch("backend.app.report_builder.data_sources.gsc.list_sheet_tabs",
+                   return_value=set(fixture)), \
+             patch("backend.app.report_builder.data_sources.gsc.fetch_tab_values",
+                   return_value=fixture), \
+             patch("backend.app.llm.LLMClient.generate_gemini_json", spy):
+            result = gsc.resolve(get_block("gsc_top_queries"), self._context())
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(calls, [], "gsc_top_queries has no branded figure to compute")
+
+    def test_learned_terms_replace_the_guess_rather_than_widening_it(self) -> None:
+        # The guess cannot be narrowed if it is unioned in, so a client whose own
+        # name contains a generic word would match generic queries for good.
+        fixture = _gsc_sheet_fixture()
+        client = _client(self.session, name="Summer", domain="summer.example",
+                         ga4_sheet_id="sheet-123")
+        context = ResolveContext(client=client, period_label="2026-06", now=utcnow(),
+                                 session=self.session)
+        with _patched_gsc_sheet(fixture=fixture, tab_titles=set(fixture),
+                                brand_terms=["one by one"]):
+            result = gsc.resolve(get_block("gsc_summary"), context)
+        # "summer dresses" (300 clicks) must NOT count just because the client is
+        # called Summer; only the learned term does.
+        self.assertEqual(result.data["branded"]["branded_clicks"], 7763 + 468)
+
+    def test_an_empty_answer_still_falls_back_to_the_guess(self) -> None:
+        with _patched_gsc_sheet(brand_terms=[]):
+            result = gsc.resolve(get_block("gsc_summary"), self._context())
+        self.assertEqual(result.data["branded"]["branded_clicks"], 7763 + 468)
+
+    def test_a_cached_row_of_the_wrong_shape_degrades_to_the_guess(self) -> None:
+        # A row written by an older version, or hand-edited, must not take the
+        # block down — it is a failure like any other.
+        with _patched_gsc_sheet(brand_terms=["one by one"]):
+            gsc.resolve(get_block("gsc_summary"), self._context())
+        row = self.session.query(ApiCache).one()
+        row.payload_json = json.dumps(["one by one"])  # a list, not the object
+        self.session.commit()
+        with _patched_gsc_sheet(brand_terms=["one by one"]):
+            result = gsc.resolve(get_block("gsc_summary"), self._context())
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.data["branded"]["branded_clicks"], 7763 + 468)
+
+    def test_the_cache_key_carries_the_rule_version(self) -> None:
+        """The stored answer never expires, so changing the classification rule
+        must change the key — otherwise every month already reported keeps its
+        answer from the old rule for good."""
+        with _patched_gsc_sheet(brand_terms=["one by one"]):
+            gsc.resolve(get_block("gsc_summary"), self._context())
+        key = self.session.query(ApiCache).one().cache_key
+        self.assertRegex(key, r"^gsc_brand_terms:v\d+:")
+        self.assertIn(gsc._BRAND_CACHE_VERSION, key)
 
     def test_the_brand_prompt_states_the_monobrand_rule(self) -> None:
         """The prompt *is* the rule, and each clause here is a bug it fixed:

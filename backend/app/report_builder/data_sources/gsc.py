@@ -241,6 +241,9 @@ A term belongs in the list only if a query above shows that spelling being used.
 """
 
 _BRAND_TTL_DAYS = 365 * 50
+# Bump this whenever the rule above changes: the stored answer never expires, so
+# without it every month already reported keeps its old-rule answer for good.
+_BRAND_CACHE_VERSION = "v3"
 _BRAND_QUERY_SAMPLE = 50
 
 
@@ -290,28 +293,36 @@ def _brand_terms(context: ResolveContext, tabs: dict, window: Window) -> list[st
             "brand_terms": answer.get("brand_terms") or [],
         }
 
+    # Everything from here on is inside the guard, reading a stored row included:
+    # a row of the wrong shape (hand-edited, or written by an older version) must
+    # degrade to the guess like any other failure, not take the block down.
     try:
         payload = api_cache.get_or_fetch(
             context.session,
-            f"gsc_brand_terms:v1:{context.client.domain}:{period}",
+            f"gsc_brand_terms:{_BRAND_CACHE_VERSION}:{context.client.domain}:{period}",
             ask,
             ttl_days=_BRAND_TTL_DAYS,
         )
-    except Exception as error:  # noqa: BLE001 - any LLM/network failure, never fatal
+        learned = sorted(
+            {
+                token
+                for term in payload["brand_terms"]
+                if len(token := _squash(str(term))) >= 3
+            }
+        )
+        brand_name = payload.get("brand_name")
+    except Exception as error:  # noqa: BLE001 - any LLM/network/shape failure, never fatal
         logger.warning("gsc_brand_terms_failed domain=%s period=%s error=%s",
                        context.client.domain, period, error)
         context.cache[memo_key] = guessed
         return guessed
 
-    learned = {
-        token
-        for term in payload.get("brand_terms") or []
-        if len(token := _squash(str(term))) >= 3
-    }
-    terms = sorted(set(guessed) | learned)
+    # The model read this month's real queries; the guess did not. So the guess is
+    # the fallback, not an addition — unioning them meant a guess that matched a
+    # generic word ("plate supply") could never be narrowed.
+    terms = learned or guessed
     logger.info("gsc_brand_terms domain=%s period=%s brand=%r guessed=%s learned=%s",
-                context.client.domain, period, payload.get("brand_name"),
-                guessed, sorted(learned))
+                context.client.domain, period, brand_name, guessed, learned)
     context.cache[memo_key] = terms
     return terms
 
@@ -454,11 +465,12 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
     if not windows.current.labels:
         return BlockResult.unavailable("Could not determine the current reporting period from the GSC sheet.")
 
-    brand_terms = _brand_terms(context, tabs, windows.current)
+    # Resolved lazily: only the two branded blocks need it, and looking it up
+    # costs a Gemini call on the first report of a month.
     if block.key == "gsc_summary":
-        return _resolve_summary(tabs, windows, brand_terms)
+        return _resolve_summary(tabs, windows, _brand_terms(context, tabs, windows.current))
     if block.key == "gsc_branded_bar":
-        return _resolve_branded_bar(tabs, windows, brand_terms)
+        return _resolve_branded_bar(tabs, windows, _brand_terms(context, tabs, windows.current))
     if block.key == "gsc_top_queries":
         return _resolve_top_queries(tabs, windows)
     return BlockResult.unavailable(f"No GSC resolver for block '{block.key}'.")
