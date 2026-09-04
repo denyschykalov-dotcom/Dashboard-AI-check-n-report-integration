@@ -442,7 +442,7 @@ th.tr-rm-c,td.tr-rm-c{width:30px;text-align:center;padding-left:0;padding-right:
   </section>
 
   <div class="foot"><b style="color:var(--accent)">Rankberry · Make your business blossom</b><br>
-    rankberry.marketing · SEO report for {{DOMAIN}} · data: GA4 · GSC · Ahrefs · ClickUp</div>
+    <span id="footerText"></span></div>
 </div>
 <script>window.DATA=__DATA_JSON__;</script><script>
 const P = DATA.meta.P;
@@ -1320,6 +1320,20 @@ function renderSummary(){
   if(ec) parts.push(` Commerce: <b>${fnum(ec.purchases)}</b> sales, <b>${fabbr(ec.revenue)}</b> revenue (all channels).`);
   el.innerHTML=parts.join('');
 }
+/** Report-wide footer line: "{client} — SEO & Visibility Report — {period}" by
+ *  default, editable like the summary but stored in customization (it isn't
+ *  tied to a block). */
+function footerDefault(){ const m=DATA.meta; return `${m.client} — SEO & Visibility Report — ${m.periodLong}`; }
+function renderFooter(){
+  const el=document.getElementById('footerText');
+  if(el.dataset.touched==='1') return;
+  el.textContent=(DATA.customization&&DATA.customization.footerText)||footerDefault();
+}
+function enableFooterEdit(){
+  const el=document.getElementById('footerText'); if(!el) return;
+  el.setAttribute('contenteditable','true'); el.classList.add('editing');
+  el.addEventListener('input',()=>{ el.dataset.touched='1'; postToParent('footer', null, el.innerText); });
+}
 function paintLabels(){
   document.querySelectorAll('.cur-lbl').forEach(e=>e.textContent=LBL[P.cur]);
   document.querySelectorAll('.cmp-lbl').forEach(e=>e.textContent=LBL[cmp()]);
@@ -1397,6 +1411,7 @@ function attachComment(sec, secId, key, html, editable){
 function renderAll(){ paintLabels();
   Object.keys(SECRENDER).forEach(secId=>{ const st=blockState(secId);
     if(st&&st.selected&&st.status==='ok'){ try{ SECRENDER[secId](); }catch(e){ console.error('render '+secId,e); } }});
+  renderFooter();
   localizeDom();
 }
 function wireTabs(){
@@ -1493,6 +1508,7 @@ function enableProseEdit(elId, noteKey, placeholder, render, initial){
 function applyEditMode(){
   if(!DATA.editable) return;
   buildEditBar();
+  enableFooterEdit();
   Object.keys(SECRENDER).forEach(secId=>{
     // b1 (hero) has no comment slot.
     if(secId==='b1') return;

@@ -83,6 +83,8 @@ export type ReportCustomization = {
    * re-exporting it shows the picture the report was built with.
    */
   aiVisibilityShot: string | null;
+  /** Report-wide footer line. Null falls back to "{client} — SEO & Visibility Report — {period}". */
+  footerText: string | null;
 };
 
 export type GenerateReportResponse = {
