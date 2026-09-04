@@ -83,8 +83,12 @@ export type ReportCustomization = {
    * re-exporting it shows the picture the report was built with.
    */
   aiVisibilityShot: string | null;
-  /** Report title override. Null falls back to "{client} — SEO & Visibility Report — {period}". */
-  heroTitle: string | null;
+  /**
+   * Hero texts retyped in the preview, keyed by the template's data-hk
+   * ("title", "tag", "lead", "metaClient", …). A missing key renders the
+   * default text built from the client and period.
+   */
+  heroText: Record<string, string>;
 };
 
 export type GenerateReportResponse = {

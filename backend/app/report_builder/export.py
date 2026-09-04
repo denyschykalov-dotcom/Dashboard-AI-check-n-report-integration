@@ -716,7 +716,7 @@ def _normalize_customization(raw: typing.Optional[dict]) -> dict:
     ``panels`` (per-block text config: size + heading/body weight),
     ``excludedTasks`` (ClickUp task ids the specialist struck off a block),
     ``aiVisibilityShot`` (the dashboard overview screenshot as a data URL) and
-    ``heroTitle`` (report title override, defaults to client/period)."""
+    ``heroText`` (per-field overrides for the hero texts)."""
     raw = raw if isinstance(raw, dict) else {}
 
     accent = raw.get("accent")
@@ -736,8 +736,10 @@ def _normalize_customization(raw: typing.Optional[dict]) -> dict:
     if not (isinstance(shot, str) and shot.startswith("data:image/")):
         shot = None
 
-    hero_title = raw.get("heroTitle")
-    hero_title = hero_title if isinstance(hero_title, str) and hero_title.strip() else None
+    # Hero texts the specialist retyped in place, keyed by the template's
+    # data-hk. Blank means "use the default", so empties are dropped.
+    hero_text = raw.get("heroText") if isinstance(raw.get("heroText"), dict) else {}
+    hero_text = {str(k): str(v) for k, v in hero_text.items() if isinstance(v, str) and v.strip()}
 
     return {
         "accent": accent,
@@ -745,7 +747,7 @@ def _normalize_customization(raw: typing.Optional[dict]) -> dict:
         "panels": panels,
         "excludedTasks": _normalize_excluded_tasks(raw.get("excludedTasks")),
         "aiVisibilityShot": shot,
-        "heroTitle": hero_title,
+        "heroText": hero_text,
     }
 
 
