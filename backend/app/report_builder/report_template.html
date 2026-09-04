@@ -83,7 +83,9 @@ h2.blk-title .scope{margin-left:auto;text-transform:none;letter-spacing:0;font-w
 
 .hero{background:linear-gradient(135deg,var(--navy),var(--navy2));color:#fff;
   border-radius:20px;padding:34px 36px;margin-top:20px;position:relative;overflow:hidden}
-.hero::after{content:"";position:absolute;inset:0;background-image:
+/* Decoration only: without pointer-events:none it covers the whole hero and
+   swallows every click, so the title cannot be selected or edited. */
+.hero::after{content:"";position:absolute;inset:0;pointer-events:none;background-image:
   linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px);background-size:26px 26px;opacity:.5}
 .hero>*{position:relative}
 .hero .tag{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#8ea0c8;font-weight:700}
