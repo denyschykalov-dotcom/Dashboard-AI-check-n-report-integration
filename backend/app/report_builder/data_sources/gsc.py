@@ -6,14 +6,21 @@ otherwise by looking it up by name in the shared client Drive folder (GSC tabs
 live in the same client sheet as GA4, per README~1.MD §2/§3): GSC Summary /
 Positions / Daily / Queries / Top Pages — trying known alternate tab names too
 ("GSC Summary" vs "GSC Overview", "GSC Queries" vs "GSC Top Queries"), since
-different client sheets in practice use slightly different titles. Branded
-share is computed from the reporting period's query sample (README's documented
-"top-50 sample" approximation), classifying a query as branded when it
-contains the client's brand name — taken from both ``client.name`` and
-``client.domain``, with the TLD stripped, since a client is often *named* after
-its domain ("onebyone.ua") and that suffix never shows up inside a query. An
-approximation, same as the original template: it will not catch every
-transliteration/spelling variant.
+different client sheets in practice use slightly different titles.
+
+Branded share is computed from the reporting period's query sample (README's
+documented "top-50 sample" approximation), by matching each query against the
+client's brand terms. Those terms come from two places:
+
+* a guess from ``client.name`` and ``client.domain`` with the TLD stripped —
+  cheap, offline, and the fallback when anything else fails, but blind to how a
+  brand is actually typed (eatlebab.com is searched as "le bab");
+* the month's own queries, read once by a model and stored against that period
+  for good — see :func:`_brand_terms`.
+
+Still an approximation over a 50-query sample, and deliberately not reviewed by
+hand: a missed query worth a few dozen clicks moves the share by ~1 pp, which is
+accepted.
 
 Metrics are keyed by monthly ``Period`` label. A custom range or full-year
 report aggregates several months (see :mod:`periods`): clicks/impressions are
@@ -23,9 +30,11 @@ position-bucket snapshot uses the window's most recent month.
 
 from __future__ import annotations
 
+import logging
 import re
 import typing
 
+from backend.app.report_builder import api_cache
 from backend.app.report_builder.block_catalog import BlockType
 from backend.app.report_builder.data_sources import periods
 from backend.app.report_builder.data_sources.base import BlockResult, ResolveContext
@@ -39,6 +48,8 @@ from backend.app.report_builder.data_sources.sheets_client import (
     rows_to_dicts,
 )
 
+
+logger = logging.getLogger("rankberry.report_builder.gsc")
 
 _TAB_ALIASES: dict[str, list[str]] = {
     "GSC Summary": ["GSC Summary", "GSC Overview"],
@@ -153,13 +164,17 @@ def _squash(value: str) -> str:
     return _NON_WORD.sub("", (value or "").lower())
 
 
-def _brand_terms(client_name: str, domain: str) -> list[str]:
-    """The brand strings to look for in a query.
+def _guessed_brand_terms(client_name: str, domain: str) -> list[str]:
+    """The brand strings guessed from the client's own name and domain.
 
     A client's *name* in this system frequently carries the domain suffix
     ("onebyone.ua"), which never appears inside a search query — matching on it
     verbatim scored every query non-branded. So each of the name and the domain
     contributes both its full form and its TLD-stripped registrable name.
+
+    Still only a guess: it cannot know that eatlebab.com is searched as "le bab",
+    or that onebyone.ua is searched as "ван бай ван". :func:`_brand_terms` asks a
+    model for those and falls back here.
     """
     terms: set[str] = set()
     for raw in (client_name, domain):
@@ -174,6 +189,131 @@ def _brand_terms(client_name: str, domain: str) -> list[str]:
 def _is_branded(query: str, brand_terms: typing.Sequence[str]) -> bool:
     squashed = _squash(query)
     return any(term in squashed for term in brand_terms)
+
+
+_BRAND_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "brand_name": {"type": "string"},
+        "brand_terms": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["brand_name", "brand_terms"],
+}
+
+# Monobrand, typos only. Each client counts as one brand — its own — and a term
+# earns its place only by being that same name spelled differently.
+#
+# The exclusions are the whole point, and each one is a bug this fixed:
+#   * a manufacturer a site resells is not that site's brand. Without this,
+#     "yamaha parts" counted as branded for yamahaonlineparts.com (95.7%) while
+#     the same query was rejected for partsvu.com (41.7%) — one question, two
+#     answers, and an 86 pp swing on a client's report.
+#   * a sibling brand the same company owns is still a different brand.
+#   * "anything that is not a name" — it once learned "yes" as a brand term.
+# With them, five of six live clients answer identically call to call.
+_BRAND_PROMPT = """You identify how one business's own name is typed into Google.
+
+Site domain: {domain}
+Business name on record: {name}
+
+These are the site's real Google Search Console queries for one month, highest
+clicks first:
+{queries}
+
+This site has exactly ONE brand: its own. Work out that brand's name, then list
+the ways it appears in the queries above.
+
+Return JSON:
+  "brand_name": the single brand name, lowercase.
+  "brand_terms": that name and only variants of that same name — misspellings,
+                 mistypings, missing or extra spaces, joined words, reversed word
+                 order, and the same name written in another alphabet.
+
+Do NOT include anything that is not that one name:
+- no other companies, including manufacturers whose products this site sells or
+  resells, and no competitors;
+- no other brands, sub-brands, product lines or venue names, even if this
+  business owns them;
+- no generic product, category, material, size or location words;
+- no numbers, part codes or filler words.
+
+A term belongs in the list only if a query above shows that spelling being used.
+"""
+
+_BRAND_TTL_DAYS = 365 * 50
+_BRAND_QUERY_SAMPLE = 50
+
+
+def _brand_terms(context: ResolveContext, tabs: dict, window: Window) -> list[str]:
+    """Brand terms for this client: the guess from its name and domain, widened
+    by asking a model which of the month's real queries name this business.
+
+    One call per client per reporting period, about $0.001, then stored against
+    that period and reused for good (see ``_BRAND_TTL_DAYS``). Any failure (no
+    API key, rate limit, bad answer) falls back to the guess alone and stores
+    nothing, so the block still renders and the next report retries.
+    """
+    guessed = _guessed_brand_terms(context.client.name or "", context.client.domain or "")
+    rows = periods.window_rows(tabs.get("GSC Queries", []), window)
+    period = window.display or window.latest
+    if not rows or not period:
+        return guessed
+
+    sample = sorted(rows, key=lambda row: -_int(row.get("Clicks")))[:_BRAND_QUERY_SAMPLE]
+    listing = "\n".join(
+        f"- {(row.get('Query') or '').strip()} ({_int(row.get('Clicks'))} clicks)"
+        for row in sample
+        if (row.get("Query") or "").strip()
+    )
+    if not listing:
+        return guessed
+
+    memo_key = ("gsc_brand_terms", context.client.domain, period)
+    if memo_key in context.cache:
+        return context.cache[memo_key]
+
+    def ask() -> dict[str, object]:
+        from backend.app.config import get_settings
+        from backend.app.llm import LLMClient
+
+        settings = get_settings()
+        prompt = _BRAND_PROMPT.format(
+            domain=context.client.domain or "",
+            name=context.client.name or "",
+            queries=listing,
+        )
+        answer, _usage = LLMClient(settings).generate_gemini_json(
+            prompt, model=settings.gemini_brand_model, schema=_BRAND_SCHEMA
+        )
+        return {
+            "brand_name": str(answer.get("brand_name") or ""),
+            "brand_terms": answer.get("brand_terms") or [],
+        }
+
+    try:
+        payload = api_cache.get_or_fetch(
+            context.session,
+            f"gsc_brand_terms:v1:{context.client.domain}:{period}",
+            ask,
+            ttl_days=_BRAND_TTL_DAYS,
+        )
+    except Exception as error:  # noqa: BLE001 - any LLM/network failure, never fatal
+        logger.warning("gsc_brand_terms_failed domain=%s period=%s error=%s",
+                       context.client.domain, period, error)
+        context.cache[memo_key] = guessed
+        return guessed
+
+    learned = {
+        token
+        for term in payload.get("brand_terms") or []
+        if len(token := _squash(str(term))) >= 3
+    }
+    terms = sorted(set(guessed) | learned)
+    logger.info("gsc_brand_terms domain=%s period=%s brand=%r guessed=%s learned=%s",
+                context.client.domain, period, payload.get("brand_name"),
+                guessed, sorted(learned))
+    context.cache[memo_key] = terms
+    return terms
 
 
 def _branded_summary(tabs: dict, window: Window, brand_terms: typing.Sequence[str]) -> dict[str, object]:
@@ -314,7 +454,7 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
     if not windows.current.labels:
         return BlockResult.unavailable("Could not determine the current reporting period from the GSC sheet.")
 
-    brand_terms = _brand_terms(context.client.name or "", context.client.domain or "")
+    brand_terms = _brand_terms(context, tabs, windows.current)
     if block.key == "gsc_summary":
         return _resolve_summary(tabs, windows, brand_terms)
     if block.key == "gsc_branded_bar":

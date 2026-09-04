@@ -1,5 +1,6 @@
 import os
 import pathlib
+import re
 import time
 import unittest
 import uuid
@@ -394,11 +395,25 @@ def _patched_ga4_sheet(fixture=None, tab_titles=None):
 
 
 @contextmanager
-def _patched_gsc_sheet(fixture=None, tab_titles=None):
+def _patched_gsc_sheet(fixture=None, tab_titles=None, brand_terms=None, brand_error=None):
+    """The GSC sheet, plus a stub for the brand-term lookup.
+
+    That lookup is a real Gemini call, so it is stubbed by default (returning no
+    learned terms, i.e. the name/domain guess alone) — an unstubbed test suite
+    would hit the network and bill for it. Pass ``brand_terms`` to exercise the
+    learned path, or ``brand_error`` to exercise the fallback.
+    """
     fixture = fixture if fixture is not None else _gsc_sheet_fixture()
     titles = tab_titles if tab_titles is not None else set(fixture.keys())
+
+    def fake_json(self, prompt, *, model, schema):
+        if brand_error is not None:
+            raise brand_error
+        return {"brand_terms": list(brand_terms or [])}, None
+
     with patch("backend.app.report_builder.data_sources.gsc.list_sheet_tabs", return_value=titles), \
-         patch("backend.app.report_builder.data_sources.gsc.fetch_tab_values", return_value=fixture):
+         patch("backend.app.report_builder.data_sources.gsc.fetch_tab_values", return_value=fixture), \
+         patch("backend.app.llm.LLMClient.generate_gemini_json", fake_json):
         yield
 
 
@@ -539,6 +554,18 @@ class GA4SheetResolverTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         self.assertIsNone(result.data["ai"]["current"])
 
+    def test_monetization_unavailable_for_a_client_that_sells_nothing(self) -> None:
+        # tarscoboltedtank.com has no GA4 Ecommerce tab at all. The block used to
+        # resolve "ok" with every figure None, which export turns into zeros — so
+        # the report shipped a Monetization section of 0s. Empty is correct here.
+        fixture = _ga4_sheet_fixture()
+        for tab in ("GA4 Ecommerce", "GA4 Ecommerce Organic", "GA4 AI Ecommerce"):
+            fixture.pop(tab, None)
+        with _patched_ga4_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = ga4.resolve(get_block("ga4_monetization"), self._context())
+        self.assertEqual(result.status, "unavailable")
+        self.assertIn("ecommerce", result.unavailable_reason.lower())
+
     def test_ai_traffic_includes_summary_tools_and_top_pages(self) -> None:
         with _patched_ga4_sheet():
             result = ga4.resolve(get_block("ga4_ai_traffic"), self._context())
@@ -655,6 +682,97 @@ class GSCSheetResolverTests(unittest.TestCase):
         self.assertEqual(result.data["branded_previous"]["branded_clicks"], 1000)
         self.assertEqual(result.data["branded_previous"]["total_clicks"], 1500)
         self.assertEqual(result.data["branded_yoy"]["total_clicks"], 0)
+
+    def test_learned_brand_terms_widen_the_match(self) -> None:
+        # The guess from "Onebyone" cannot know about the Cyrillic spelling; the
+        # model reads it off the month's own queries.
+        fixture = _gsc_sheet_fixture()
+        fixture["GSC Queries"].append(["Jun 2026", "ван бай ван", "1439", "16415", "8.77", "1.1"])
+        with _patched_gsc_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            without = gsc.resolve(get_block("gsc_summary"), self._context())
+        # a separate session, so the run above does not answer this one from cache
+        other = ResolveContext(client=self.client, period_label="2026-06", now=utcnow(),
+                               session=_make_session())
+        with _patched_gsc_sheet(fixture=fixture, tab_titles=set(fixture.keys()),
+                                brand_terms=["ван бай ван", "one by one"]):
+            with_terms = gsc.resolve(get_block("gsc_summary"), other)
+        self.assertEqual(without.data["branded"]["branded_clicks"], 7763 + 468)
+        self.assertEqual(with_terms.data["branded"]["branded_clicks"], 7763 + 468 + 1439)
+
+    def test_short_or_empty_learned_terms_are_ignored(self) -> None:
+        # A 1-2 character "term" would match almost every query.
+        with _patched_gsc_sheet(brand_terms=["a", "", "  ", "x!"]):
+            result = gsc.resolve(get_block("gsc_summary"), self._context())
+        self.assertEqual(result.data["branded"]["branded_clicks"], 7763 + 468)
+
+    def test_brand_term_lookup_failure_falls_back_to_the_guess(self) -> None:
+        with _patched_gsc_sheet(brand_error=RuntimeError("gemini is down")):
+            result = gsc.resolve(get_block("gsc_summary"), self._context())
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.data["branded"]["branded_clicks"], 7763 + 468)
+        # nothing cached, so the next report retries rather than keeping a failure
+        self.assertEqual(self.session.query(ApiCache).count(), 0)
+
+    def test_brand_terms_are_kept_against_the_period_and_replayed(self) -> None:
+        """The model is not reproducible call to call, so a month's classification
+        is stored against that month and reused — every later report of the same
+        month must print the identical branded share."""
+        calls = []
+
+        def counting(_self, prompt, *, model, schema):
+            calls.append(model)
+            return {"brand_terms": ["ван бай ван"]}, None
+
+        fixture = _gsc_sheet_fixture()
+        fixture["GSC Queries"].append(["Jun 2026", "ван бай ван", "1439", "16415", "8.77", "1.1"])
+        titles = set(fixture.keys())
+        with patch("backend.app.report_builder.data_sources.gsc.list_sheet_tabs", return_value=titles), \
+             patch("backend.app.report_builder.data_sources.gsc.fetch_tab_values", return_value=fixture), \
+             patch("backend.app.llm.LLMClient.generate_gemini_json", counting):
+            first = gsc.resolve(get_block("gsc_summary"), self._context())
+            second = gsc.resolve(get_block("gsc_summary"), self._context())  # fresh context
+        self.assertEqual(len(calls), 1, "the second report of the same month must not ask again")
+        self.assertEqual(first.data["branded"]["branded_share_pct"],
+                         second.data["branded"]["branded_share_pct"])
+        row = self.session.query(ApiCache).one()
+        self.assertIn("Jun 2026", row.cache_key)
+        # kept, not expired after a month
+        self.assertGreater((row.expires_at.date() - date.today()).days, 365)
+
+    def test_a_different_period_gets_its_own_stored_answer(self) -> None:
+        calls = []
+
+        def counting(_self, prompt, *, model, schema):
+            calls.append(prompt)
+            return {"brand_terms": []}, None
+
+        fixture = _gsc_sheet_fixture()
+        fixture["GSC Queries"].append(["May 2026", "one by one", "900", "5000", "18", "1.6"])
+        titles = set(fixture.keys())
+        with patch("backend.app.report_builder.data_sources.gsc.list_sheet_tabs", return_value=titles), \
+             patch("backend.app.report_builder.data_sources.gsc.fetch_tab_values", return_value=fixture), \
+             patch("backend.app.llm.LLMClient.generate_gemini_json", counting):
+            gsc.resolve(get_block("gsc_summary"), self._context())
+            context = ResolveContext(
+                client=self.client, period_label="2026-05", now=utcnow(), session=self.session,
+                period_selection=PeriodSelection(start=date(2026, 5, 1), end=date(2026, 5, 1)),
+            )
+            gsc.resolve(get_block("gsc_summary"), context)
+        self.assertEqual(len(calls), 2)
+        keys = {row.cache_key for row in self.session.query(ApiCache).all()}
+        self.assertTrue(any("Jun 2026" in k for k in keys), keys)
+        self.assertTrue(any("May 2026" in k for k in keys), keys)
+
+    def test_the_brand_prompt_states_the_monobrand_rule(self) -> None:
+        """The prompt *is* the rule, and each clause here is a bug it fixed:
+        counting a resold manufacturer's name (86 pp swing on one client),
+        counting a sibling brand, and learning "yes" as a brand term."""
+        prompt = gsc._BRAND_PROMPT.lower()
+        self.assertIn("exactly one brand", prompt)
+        self.assertIn("resells", prompt)
+        self.assertIn("sub-brands", prompt)
+        self.assertIn("filler words", prompt)
+        self.assertIn("another alphabet", prompt)  # ван бай ван must still count
 
     def test_branded_bar_shares_branded_calc(self) -> None:
         with _patched_gsc_sheet():
@@ -3278,3 +3396,73 @@ class ApiCacheTransactionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PeriodLabelFormatTests(unittest.TestCase):
+    def test_full_month_names_parse(self) -> None:
+        # tarsco's "GA4 Key Events" tab writes "June 2026", not "Jun 2026". An
+        # unparseable label drops every row of that tab silently — an empty
+        # section with nothing to explain it.
+        self.assertEqual(periods.parse_label("June 2026"), date(2026, 6, 1))
+        self.assertEqual(periods.parse_label("Jun 2026"), date(2026, 6, 1))
+        self.assertIsNone(periods.parse_label("Juneish 2026"))
+
+    def test_rows_are_kept_for_a_full_month_name_tab(self) -> None:
+        rows = [{"Period": "June 2026", "Event Name": "purchase", "Count": "42"}]
+        windows = periods.resolve_windows([r["Period"] for r in rows])
+        self.assertEqual(periods.window_rows(rows, windows.current), rows)
+
+
+class ComparisonPeriodFallbackTests(unittest.TestCase):
+    """A brand-new client's sheet holds only the current month, so there is no
+    previous and no year-ago period to compare against. The report's render
+    functions used to read ``DATA.<block>[cmp()]`` for a period DATA had no
+    bucket for; the throw was swallowed by ``renderAll``'s try/catch into a
+    console.error, so four whole sections (b5/b7/b8/b9) silently came out blank.
+    """
+
+    TEMPLATE = pathlib.Path(report_export.__file__).with_name("report_template.html")
+
+    def test_no_render_function_reads_a_comparison_period_unguarded(self) -> None:
+        text = self.TEMPLATE.read_text(encoding="utf-8")
+        # Every DATA.<key>[cmp()] / [P.prev] / [P.yoy] read must carry a fallback
+        # (`|| ...`) or go through cmpBucket(), which zero-fills a missing period.
+        bad = [
+            line.strip()
+            for line in text.splitlines()
+            if re.search(r"DATA\.\w+\[(?:cmp\(\)|P\.prev|P\.yoy)\]", line)
+            and "||" not in line
+        ]
+        self.assertEqual(bad, [], f"unguarded comparison-period reads: {bad}")
+
+    def test_cmp_bucket_zero_fills_and_deltas_stay_honest(self) -> None:
+        text = self.TEMPLATE.read_text(encoding="utf-8")
+        # The zero-fill keeps the section rendering; hasCmp() keeps the raw
+        # arithmetic deltas from reading that zero as real growth.
+        self.assertIn("const cmpBucket =", text)
+        self.assertIn("const hasCmp =", text)
+        self.assertIn("function ppDelta(cur,prev){ if(!hasCmp())", text)
+
+    def test_single_month_report_still_carries_every_current_figure(self) -> None:
+        # No previous_period / yoy_period at all -> only the current bucket is
+        # keyed, and the report must still be built (not raise) with it.
+        blocks = [{
+            "block_type_key": "gsc_summary", "status": "ok", "position": 0,
+            "comment": None, "unavailable_reason": None,
+            "data": {
+                "period": "Aug 2026", "previous_period": None, "yoy_period": None,
+                "kpis": {"current": {"clicks": 46521, "impressions": 1982692,
+                                     "ctr": 2.35, "avg_position": 8.2}},
+                "positions": {"current": {"top3": 622, "top10": 1873}},
+                "daily": [{"date": "2026-08-01", "clicks": 1314}],
+                "branded": {"branded_clicks": 100, "total_clicks": 200,
+                            "branded_share_pct": 50.0},
+            },
+        }]
+        html = report_export.build_preview_html(
+            period_label="Aug 2026", default_comparison="mom,yoy", blocks=blocks,
+            client_name="New Client", client_domain="new.example",
+        )
+        self.assertIn("46521", html.replace(",", ""))
+        # only the current period is keyed, and its label is present
+        self.assertIn('"2026-08"', html)

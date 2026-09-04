@@ -328,6 +328,15 @@ def _resolve_monetization(tabs: dict, windows: Windows) -> BlockResult:
     # read from the client sheet's "GA4 AI Ecommerce" tab. Absent for clients
     # whose collector doesn't yet populate it — the section then renders empty.
     ai_rows = tabs.get("GA4 AI Ecommerce", [])
+    # No rows in any ecommerce tab means this client doesn't sell online (or the
+    # collector never populated them). Shipping a section of zeros reads as a
+    # broken report, so say the source is empty and let the section be dropped —
+    # same rule the AI-traffic and GSC blocks below/beside this one already use.
+    if not (site_rows or organic_rows or ai_rows):
+        return BlockResult.unavailable(
+            "No ecommerce data in the client sheet (no 'GA4 Ecommerce' tab rows) "
+            "— expected for a client that doesn't sell online."
+        )
     return BlockResult.ok(
         {
             "period": windows.current.display,
@@ -359,6 +368,7 @@ def _resolve_monetization(tabs: dict, windows: Windows) -> BlockResult:
 
 def _resolve_ai_traffic(tabs: dict, windows: Windows) -> BlockResult:
     summary_rows = tabs.get("GA4 AI Summary", [])
+    site_rows = tabs.get("GA4 Summary", [])
     tools_rows = periods.window_rows(tabs.get("GA4 AI Traffic", []), windows.current)
     top_pages_rows = periods.window_rows(tabs.get("GA4 AI Top Pages", []), windows.current)
     ai_ecommerce_rows = tabs.get("GA4 AI Ecommerce", [])
@@ -420,6 +430,15 @@ def _resolve_ai_traffic(tabs: dict, windows: Windows) -> BlockResult:
             },
             "tools": tools,
             "top_pages": top_pages,
+            # Site-wide sessions, so this section can work out AI traffic's share
+            # of the whole site and of organic. Carried here as well as in the GA4
+            # block, for the same reason as ``ecommerce`` below: a report can
+            # select this block without that one.
+            "site_wide": {
+                "current": _summary_kpi(periods.window_rows(site_rows, windows.current)),
+                "previous": _summary_kpi(periods.window_rows(site_rows, windows.previous)),
+                "yoy": _summary_kpi(periods.window_rows(site_rows, windows.yoy)),
+            },
             "currency": _currency_of(ai_ecommerce_rows),
             # Sales made by AI-referred visitors. Carried here as well as in the
             # monetization block, because the AI-Traffic section shows them and a

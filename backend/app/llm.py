@@ -281,7 +281,36 @@ class LLMClient:
             )
         return "\n\n".join(chunks)
 
-    def _call_gemini(self, prompt: str, model: str) -> TextGenerationResult:
+    def generate_gemini_json(
+        self, prompt: str, *, model: str, schema: dict[str, object]
+    ) -> tuple[dict[str, object], typing.Optional[LLMUsage]]:
+        """One Gemini call answered as JSON matching ``schema``.
+
+        Gemini enforces the schema itself, so unlike
+        :meth:`_call_gemini_for_json_object` this needs no
+        "that was not valid JSON, try again" round trips.
+        """
+        result = self._call_gemini(
+            prompt,
+            model,
+            generation_config={"responseMimeType": "application/json", "responseSchema": schema},
+        )
+        try:
+            parsed = json.loads(result.text)
+        except json.JSONDecodeError as error:
+            raise RetryableLLMError(
+                f"Gemini schema response was not JSON: {result.text[:300]}") from error
+        if not isinstance(parsed, dict):
+            raise RetryableLLMError(f"Gemini returned {type(parsed).__name__}, expected an object")
+        return parsed, result.usage
+
+    def _call_gemini(
+        self,
+        prompt: str,
+        model: str,
+        *,
+        generation_config: typing.Optional[dict[str, object]] = None,
+    ) -> TextGenerationResult:
         if not self.settings.gemini_api_key:
             raise NonRetryableLLMError("GEMINI_API_KEY is not configured.")
 
@@ -291,7 +320,7 @@ class LLMClient:
         )
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2},
+            "generationConfig": generation_config or {"temperature": 0.2},
         }
         response = self._post_json(endpoint, headers={}, json_body=payload)
         try:

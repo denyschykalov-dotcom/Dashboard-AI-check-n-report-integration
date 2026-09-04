@@ -456,6 +456,19 @@ const state = {mode: MODES[0].id};
 const CUR = DATA.meta.currency || '$';
 const money = n => fnum(n)+' '+CUR, moneyAbbr = n => fabbr(n)+' '+CUR;
 const cmp = ()=> state.mode==='mom' ? P.prev : P.yoy;
+// A brand-new client's sheet can hold only the current month, so cmp() names a
+// period DATA has no bucket for. Reading it unguarded threw, and renderAll
+// swallows a section's throw into console.error — so the whole section just came
+// out blank. Fall back to a zero of the same shape: the current figures still
+// render, and pct() turns a 0 baseline into an honest "—" instead of a fake delta.
+const zeroLike = o => Object.fromEntries(Object.keys(o||{}).map(k=>[k,0]));
+const cmpBucket = (byPeriod, cur) => (byPeriod && byPeriod[cmp()]) || zeroLike(cur);
+// pct() already dashes a 0 baseline, but the raw-arithmetic deltas below would
+// read a zero-filled fallback as real growth ("+55.7 pp" against a month that
+// does not exist), so they check this instead.
+const hasCmp = () => cmp() != null;
+const NO_DELTA = '<span class="faint small">—</span>';
+if(!LBL[cmp()]) LBL[cmp()] = '—';  // ...and don't print "undefined" as its caption
 
 // --- customization: report-wide accent, per chart-slot variant, per-panel text ---
 const CUS = DATA.customization || {charts:{}, panels:{}, accent:null};
@@ -561,7 +574,7 @@ function deltaHTML(cur,prev,opts){ opts=opts||{};
   const absS = sign+fabbr(Math.abs(abs));
   return `<span class="delta-pill ${cls}">${d>0?'+':''}${d.toFixed(1)}%</span><span class="absd">${absS}</span>`;
 }
-function ppDelta(cur,prev){ const d=(cur-prev); const cls=Math.abs(d)<0.05?'flat':(d>0?'up':'down');
+function ppDelta(cur,prev){ if(!hasCmp()) return NO_DELTA; const d=(cur-prev); const cls=Math.abs(d)<0.05?'flat':(d>0?'up':'down');
   return `<span class="delta-pill ${cls}">${d>0?'+':''}${d.toFixed(1)} pp</span>`; }
 function posChange(now,was){ const d=was-now; if(d>0) return `<span class="up">▲ ${d}</span>`;
   if(d<0) return `<span class="down">▼ ${Math.abs(d)}</span>`; return `<span class="faint">–</span>`;}
@@ -747,13 +760,13 @@ function funnel(el, stages){
 }
 // fix #5: readable position distribution — both period values labelled + delta
 function posBars2(el, rows){
-  const max=Math.max(1,...rows.map(r=>Math.max(r.cur,r.prev)));
-  el.innerHTML=rows.map(r=>{ const wc=r.cur/max*100, wp=r.prev/max*100; const d=r.cur-r.prev;
+  const max=Math.max(1,...rows.map(r=>Math.max(r.cur,r.prev||0)));
+  el.innerHTML=rows.map(r=>{ const wc=r.cur/max*100, wp=(r.prev||0)/max*100; const d=r.cur-r.prev;
     const dcls=Math.abs(d)<1?'flat':(d>0?'up':'down');
     return `<div style="margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
         <b style="font-size:13px">${r.label}</b>
-        <span class="delta-pill ${dcls}">${d>0?'+':''}${fnum(d)}</span></div>
+        ${hasCmp()?`<span class="delta-pill ${dcls}">${d>0?'+':''}${fnum(d)}</span>`:NO_DELTA}</div>
       <div style="display:flex;align-items:center;gap:9px;margin-bottom:4px">
         <div style="flex:1;height:15px;background:var(--bg2);border-radius:4px"><div style="height:15px;width:${wc}%;background:var(--blue);border-radius:4px"></div></div>
         <span style="width:56px;text-align:right;font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums">${fnum(r.cur)}</span></div>
@@ -891,7 +904,7 @@ function moverTable(rows){
 function renderAhMovers(){ document.getElementById('ahGain').innerHTML=moverTable(DATA.ahrefsGainers);
   document.getElementById('ahLose').innerHTML=moverTable(DATA.ahrefsLosers); }
 function renderGA4(){
-  const c=DATA.ga4[P.cur], p=DATA.ga4[cmp()];
+  const c=DATA.ga4[P.cur], p=cmpBucket(DATA.ga4,c);
   document.getElementById('ga4Score').innerHTML=
     scEl('Total sessions', fabbr(c.sessions), deltaHTML(c.sessions,p.sessions))+
     scEl('Organic sessions', fabbr(c.organic), deltaHTML(c.organic,p.organic))+
@@ -965,7 +978,7 @@ function renderLanding(){
     `<thead><tr><th>Landing page</th><th class="r">Sessions</th><th class="r">vs ${LBL[cmp()]}</th><th class="r">Engaged</th><th class="r">Bounce</th></tr></thead>`);
 }
 function renderEcom(){
-  const c=DATA.ecom[P.cur], p=DATA.ecom[cmp()];
+  const c=DATA.ecom[P.cur], p=cmpBucket(DATA.ecom,c);
   const aov=c.purchases?c.revenue/c.purchases:0, aovP=p.purchases?p.revenue/p.purchases:0;
   const cr=c.checkouts?c.purchases/c.checkouts*100:0, crP=p.checkouts?p.purchases/p.checkouts*100:0;
   document.getElementById('ecScore').innerHTML=
@@ -1011,7 +1024,7 @@ function renderAiRevenue(){
      <tr><td>Checkout</td><td class="r">${fnum(ai.checkouts)}</td><td class="r muted">${fnum(aip.checkouts)}</td><td class="r">${deltaHTML(ai.checkouts,aip.checkouts)}</td></tr></tbody></table>`;
 }
 function renderAI(){
-  const c=DATA.aiSummary[P.cur], p=DATA.aiSummary[cmp()]; const ga4c=DATA.ga4[P.cur];
+  const c=DATA.aiSummary[P.cur], p=cmpBucket(DATA.aiSummary,c); const ga4c=(DATA.ga4&&DATA.ga4[P.cur])||{};
   const shareTot=ga4c.sessions?c.sessions/ga4c.sessions*100:0; const vsOrg=ga4c.organic?c.sessions/ga4c.organic*100:0;
   // Sales made by AI-referred visitors, shown here too — the same numbers the
   // monetization block breaks down, but this is where they get read.
@@ -1073,12 +1086,12 @@ function renderAIVisibility(){
   renderModel(models[0].key);
 }
 function renderGSC(){
-  const c=DATA.gsc[P.cur], p=DATA.gsc[cmp()]; const pc=DATA.gscPos[P.cur], pp=DATA.gscPos[cmp()];
+  const c=DATA.gsc[P.cur], p=cmpBucket(DATA.gsc,c); const pc=DATA.gscPos[P.cur], pp=cmpBucket(DATA.gscPos,pc);
   const posD=c.position-p.position; const posCls=posD<0?'up':(posD>0?'down':'flat');
   document.getElementById('gscScore').innerHTML=
     scEl('Clicks', fabbr(c.clicks), deltaHTML(c.clicks,p.clicks))+
     scEl('Impressions', fabbr(c.impressions), deltaHTML(c.impressions,p.impressions))+
-    scEl('Avg position', c.position.toFixed(1), `<span class="delta-pill ${posCls}">${posD>0?'+':''}${posD.toFixed(1)}</span>`, 'lower is better')+
+    scEl('Avg position', c.position.toFixed(1), hasCmp()?`<span class="delta-pill ${posCls}">${posD>0?'+':''}${posD.toFixed(1)}</span>`:NO_DELTA, 'lower is better')+
     scEl('Top-3 keywords', fnum(pc.top3), deltaHTML(pc.top3,pp.top3))+
     scEl('Top-10 keywords', fnum(pc.top10), deltaHTML(pc.top10,pp.top10));
   const dc=DATA.gscDaily[P.cur].map(d=>d.clicks), dp=(DATA.gscDaily[cmp()]||[]).map(d=>d.clicks);

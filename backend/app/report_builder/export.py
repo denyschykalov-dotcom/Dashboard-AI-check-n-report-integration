@@ -408,6 +408,17 @@ def _build_data(
         # monetization block above fills — so without that block selected they
         # rendered nothing. This block carries the same figures; use them when
         # it is the only one in the report.
+        # Same story for the site-wide session totals this section divides by
+        # ("Share of total", "vs organic search"): without the GA4 block selected
+        # data["ga4"] was absent and the whole section threw, which renderAll
+        # swallows into console.error — it just came out blank.
+        site = d.get("site_wide") or {}
+        if site and not data.get("ga4"):
+            data["ga4"] = {
+                P[pk]: _ga4_kpi(site.get(sub))
+                for pk, sub in (("cur", "current"), ("prev", "previous"), ("yoy", "yoy"))
+                if pk in P
+            }
         ai_ec = d.get("ecommerce") or {}
         if ai_ec and not data.get("aiEcom"):
             data["aiEcom"] = {

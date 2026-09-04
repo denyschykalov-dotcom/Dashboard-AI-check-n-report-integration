@@ -119,6 +119,9 @@ class Settings:
     # every caller that builds a Settings by hand gets the closed list rather
     # than having to know about it.
     allowed_origins: tuple[str, ...] = _DEFAULT_ALLOWED_ORIGINS
+    # Brand-query classification is a small, once-a-month, strict-JSON job, so it
+    # runs on the cheapest tier rather than the model the AI-check uses.
+    gemini_brand_model: str = "gemini-3.5-flash-lite"
 
 
 @lru_cache(maxsize=1)
@@ -187,6 +190,10 @@ def get_settings() -> Settings:
             _read_env("GEMINI_SENTIMENT_MODEL", _read_env(
                 "GEMINI_MODEL", "gemini-2.0-flash"))
             or "gemini-2.0-flash"
+        ),
+        gemini_brand_model=(
+            _read_env("GEMINI_BRAND_MODEL", "gemini-3.5-flash-lite")
+            or "gemini-3.5-flash-lite"
         ),
         grok_model=_read_env("GROK_MODEL", "grok-4.3") or "grok-4.3",
         grok_base_url=(

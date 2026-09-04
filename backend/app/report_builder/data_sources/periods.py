@@ -36,11 +36,20 @@ def month_label(value: date) -> str:
 
 
 def parse_label(label: typing.Optional[str]) -> typing.Optional[date]:
-    """Parse a ``"Jun 2026"`` label to the first of that month (or None)."""
-    try:
-        return datetime.strptime((label or "").strip(), "%b %Y").date().replace(day=1)
-    except (ValueError, AttributeError):
-        return None
+    """Parse a ``"Jun 2026"`` label to the first of that month (or None).
+
+    Full month names are accepted too: tab names are typed by hand and some
+    collectors write "June 2026". A label that does not parse drops every row of
+    that tab silently, which showed up as an empty section (seen on tarsco's
+    "GA4 Key Events" tab).
+    """
+    text = (label or "").strip()
+    for fmt in ("%b %Y", "%B %Y"):
+        try:
+            return datetime.strptime(text, fmt).date().replace(day=1)
+        except (ValueError, AttributeError):
+            continue
+    return None
 
 
 def _shift(value: date, months: int) -> date:
