@@ -71,7 +71,7 @@ const DEFAULT_CUSTOMIZATION: ReportCustomization = {
   panels: {},
   excludedTasks: {},
   aiVisibilityShot: null,
-  footerText: null,
+  heroTitle: null,
 };
 
 // The block whose comment *is* the executive summary at the top of the report.
@@ -992,7 +992,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
         | null;
       if (!data || data.source !== "report-preview") return;
       // The preview reports notes, chart-type choices, struck-off ClickUp tasks
-      // and the footer line: the accent is fixed pink and per-panel text sizing
+      // and the hero title: the accent is fixed pink and per-panel text sizing
       // was removed, so neither of those can change.
       if (data.kind === "note" && typeof data.key === "string") {
         const key = data.key;
@@ -1011,8 +1011,8 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
           else delete next[key];
           return { ...current, excludedTasks: next };
         });
-      } else if (data.kind === "footer") {
-        setCustomization((current) => ({ ...current, footerText: String(data.value ?? "") }));
+      } else if (data.kind === "header") {
+        setCustomization((current) => ({ ...current, heroTitle: String(data.value ?? "") }));
       }
     }
     window.addEventListener("message", onMessage);

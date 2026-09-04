@@ -41,7 +41,7 @@ body{margin:0;background:var(--bg);color:var(--ink);
 .panel-config select{font:inherit;padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
 .panel-config .pc-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--faint);font-weight:700}
 .card-comment.editing .cc-body:focus{outline:none}
-#summary.editing{cursor:text}
+#summary.editing,#heroTitle.editing{cursor:text}
 #summary.editing:empty:before{content:attr(data-ph);color:#c9d2ea}
 .wrap{max-width:1120px;margin:0 auto;padding:0 20px 80px}
 a{color:var(--blue);text-decoration:none}
@@ -442,7 +442,7 @@ th.tr-rm-c,td.tr-rm-c{width:30px;text-align:center;padding-left:0;padding-right:
   </section>
 
   <div class="foot"><b style="color:var(--accent)">Rankberry · Make your business blossom</b><br>
-    <span id="footerText"></span></div>
+    rankberry.marketing · SEO report for {{DOMAIN}} · data: GA4 · GSC · Ahrefs · ClickUp</div>
 </div>
 <script>window.DATA=__DATA_JSON__;</script><script>
 const P = DATA.meta.P;
@@ -794,9 +794,17 @@ function setSection(id, on, useParent){ const el=document.getElementById(id); if
 
 function renderIntro(){
   const m=DATA.meta;
-  // The report-name text sits in its own span so the language pass can match it
-  // as a whole string, without the client name or period bleeding into the key.
-  document.getElementById('heroTitle').innerHTML=`${m.client} — <span class="rt">SEO &amp; Visibility Report</span> — <span class="mo">${m.periodLong}</span>`;
+  const title=document.getElementById('heroTitle');
+  // Once the specialist has typed a custom title, keep it across re-renders
+  // (comparison toggle etc.) instead of overwriting with the computed default.
+  if(title.dataset.touched!=='1'){
+    const raw=(DATA.customization&&DATA.customization.heroTitle)||'';
+    if(raw){ title.textContent=raw; }
+    // The report-name text sits in its own span so the language pass can match
+    // it as a whole string, without the client name or period bleeding into
+    // the key.
+    else{ title.innerHTML=`${m.client} — <span class="rt">SEO &amp; Visibility Report</span> — <span class="mo">${m.periodLong}</span>`; }
+  }
   document.getElementById('heroMeta').innerHTML=
     `<div>Client<b>${m.client}</b></div><div>Domain<b>${m.domain}</b></div>
      <div>Period<b>${m.period}</b></div><div>Prepared<b>${m.prepared}</b></div>`;
@@ -1320,19 +1328,13 @@ function renderSummary(){
   if(ec) parts.push(` Commerce: <b>${fnum(ec.purchases)}</b> sales, <b>${fabbr(ec.revenue)}</b> revenue (all channels).`);
   el.innerHTML=parts.join('');
 }
-/** Report-wide footer line: "{client} — SEO & Visibility Report — {period}" by
- *  default, editable like the summary but stored in customization (it isn't
- *  tied to a block). */
-function footerDefault(){ const m=DATA.meta; return `${m.client} — SEO & Visibility Report — ${m.periodLong}`; }
-function renderFooter(){
-  const el=document.getElementById('footerText');
-  if(el.dataset.touched==='1') return;
-  el.textContent=(DATA.customization&&DATA.customization.footerText)||footerDefault();
-}
-function enableFooterEdit(){
-  const el=document.getElementById('footerText'); if(!el) return;
+// The hero title is editable like the summary, but it isn't tied to a block,
+// so the raw override lives in customization (see renderIntro) instead of a
+// block comment.
+function enableHeaderEdit(){
+  const el=document.getElementById('heroTitle'); if(!el) return;
   el.setAttribute('contenteditable','true'); el.classList.add('editing');
-  el.addEventListener('input',()=>{ el.dataset.touched='1'; postToParent('footer', null, el.innerText); });
+  el.addEventListener('input',()=>{ el.dataset.touched='1'; postToParent('header', null, el.innerText); });
 }
 function paintLabels(){
   document.querySelectorAll('.cur-lbl').forEach(e=>e.textContent=LBL[P.cur]);
@@ -1411,7 +1413,6 @@ function attachComment(sec, secId, key, html, editable){
 function renderAll(){ paintLabels();
   Object.keys(SECRENDER).forEach(secId=>{ const st=blockState(secId);
     if(st&&st.selected&&st.status==='ok'){ try{ SECRENDER[secId](); }catch(e){ console.error('render '+secId,e); } }});
-  renderFooter();
   localizeDom();
 }
 function wireTabs(){
@@ -1508,9 +1509,9 @@ function enableProseEdit(elId, noteKey, placeholder, render, initial){
 function applyEditMode(){
   if(!DATA.editable) return;
   buildEditBar();
-  enableFooterEdit();
+  enableHeaderEdit();
   Object.keys(SECRENDER).forEach(secId=>{
-    // b1 (hero) has no comment slot.
+    // b1 (hero) has a title edit (above) but no comment slot.
     if(secId==='b1') return;
     const sec=document.getElementById(secId); if(!sec) return;
     const st=blockState(secId); if(!st||!st.selected||st.status!=='ok') return;

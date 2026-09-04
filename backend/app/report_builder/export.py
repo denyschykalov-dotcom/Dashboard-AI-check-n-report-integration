@@ -716,7 +716,7 @@ def _normalize_customization(raw: typing.Optional[dict]) -> dict:
     ``panels`` (per-block text config: size + heading/body weight),
     ``excludedTasks`` (ClickUp task ids the specialist struck off a block),
     ``aiVisibilityShot`` (the dashboard overview screenshot as a data URL) and
-    ``footerText`` (report-wide footer line, defaults to client/period)."""
+    ``heroTitle`` (report title override, defaults to client/period)."""
     raw = raw if isinstance(raw, dict) else {}
 
     accent = raw.get("accent")
@@ -736,8 +736,8 @@ def _normalize_customization(raw: typing.Optional[dict]) -> dict:
     if not (isinstance(shot, str) and shot.startswith("data:image/")):
         shot = None
 
-    footer_text = raw.get("footerText")
-    footer_text = footer_text if isinstance(footer_text, str) and footer_text.strip() else None
+    hero_title = raw.get("heroTitle")
+    hero_title = hero_title if isinstance(hero_title, str) and hero_title.strip() else None
 
     return {
         "accent": accent,
@@ -745,7 +745,7 @@ def _normalize_customization(raw: typing.Optional[dict]) -> dict:
         "panels": panels,
         "excludedTasks": _normalize_excluded_tasks(raw.get("excludedTasks")),
         "aiVisibilityShot": shot,
-        "footerText": footer_text,
+        "heroTitle": hero_title,
     }
 
 
