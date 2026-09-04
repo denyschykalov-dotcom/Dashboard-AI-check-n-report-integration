@@ -440,16 +440,15 @@ def _build_data(
             k = P.get(pk)
             if k and dly_key in d:
                 data["gscDaily"][k] = _gsc_daily(d.get(dly_key))
-        b = d.get("branded") or {}
         data["branded"] = {}
-        if cur_k:
-            data["branded"][cur_k] = {"branded": _num(b.get("branded_clicks")),
-                                      "total": _num(b.get("total_clicks")),
-                                      "share": _num(b.get("branded_share_pct"))}
-        # prev/yoy branded not computed by the resolver — zero rows so the table renders
-        for k in (prev_k, yoy_k):
-            if k:
-                data["branded"][k] = {"branded": 0, "total": 0, "share": 0}
+        for pk, b_key in (("cur", "branded"), ("prev", "branded_previous"), ("yoy", "branded_yoy")):
+            k = P.get(pk)
+            if not k:
+                continue
+            b = d.get(b_key) or {}
+            data["branded"][k] = {"branded": _num(b.get("branded_clicks")),
+                                  "total": _num(b.get("total_clicks")),
+                                  "share": _num(b.get("branded_share_pct"))}
 
     # -- GSC queries/pages (b10) --
     if "gsc_top_queries" in ok and cur_k:

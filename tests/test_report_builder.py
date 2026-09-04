@@ -634,6 +634,28 @@ class GSCSheetResolverTests(unittest.TestCase):
         self.assertEqual(result.data["branded"]["branded_clicks"], 7763 + 468)
         self.assertEqual(result.data["branded"]["total_clicks"], 7763 + 468 + 300)
 
+    def test_branded_matches_when_client_name_carries_the_domain_suffix(self) -> None:
+        # Regression: this client is *named* "onebyone.ua". Matching queries
+        # against that verbatim scored every query non-branded (0%), even though
+        # "one by one" / "onebyone ua" are plainly brand queries.
+        client = _client(self.session, name="onebyone.ua", domain="onebyone.ua", ga4_sheet_id="sheet-123")
+        context = ResolveContext(client=client, period_label="2026-06", now=utcnow(), session=self.session)
+        with _patched_gsc_sheet():
+            result = gsc.resolve(get_block("gsc_summary"), context)
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.data["branded"]["branded_clicks"], 7763 + 468)
+        self.assertEqual(result.data["branded"]["branded_share_pct"], 96.5)
+
+    def test_branded_computed_for_previous_and_yoy_windows(self) -> None:
+        fixture = _gsc_sheet_fixture()
+        fixture["GSC Queries"].append(["May 2026", "one by one", "1000", "5000", "20", "1.5"])
+        fixture["GSC Queries"].append(["May 2026", "summer dresses", "500", "9000", "5.5", "8"])
+        with _patched_gsc_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = gsc.resolve(get_block("gsc_summary"), self._context())
+        self.assertEqual(result.data["branded_previous"]["branded_clicks"], 1000)
+        self.assertEqual(result.data["branded_previous"]["total_clicks"], 1500)
+        self.assertEqual(result.data["branded_yoy"]["total_clicks"], 0)
+
     def test_branded_bar_shares_branded_calc(self) -> None:
         with _patched_gsc_sheet():
             result = gsc.resolve(get_block("gsc_branded_bar"), self._context())

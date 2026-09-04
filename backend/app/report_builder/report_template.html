@@ -1099,7 +1099,7 @@ function renderGSC(){
   else donut(document.getElementById('brandDonut'), brandItems);
   document.getElementById('brandTable').innerHTML=
     `<table><thead><tr><th>Period</th><th class="r">Branded</th><th class="r">Total (top)</th><th class="r">Share</th></tr></thead><tbody>${
-    [P.cur,P.prev,P.yoy].map(k=>{const x=DATA.branded[k];return `<tr><td>${k===P.cur?'<b>'+LBL[k]+'</b>':'<span class="muted">'+LBL[k]+'</span>'}</td>
+    [P.cur,P.prev,P.yoy].filter(k=>k&&DATA.branded[k]).map(k=>{const x=DATA.branded[k];return `<tr><td>${k===P.cur?'<b>'+LBL[k]+'</b>':'<span class="muted">'+LBL[k]+'</span>'}</td>
       <td class="r">${fnum(x.branded)}</td><td class="r">${fnum(x.total)}</td><td class="r"><b>${x.share}%</b></td></tr>`;}).join('')}</tbody></table>
       <div class="txtnote">Share computed from the current-period GSC query sample (queries containing the client's brand name).</div>`;
   setSection('brandTable', sectionOn('branded_trend', true), true);

@@ -9,8 +9,11 @@ Positions / Daily / Queries / Top Pages — trying known alternate tab names too
 different client sheets in practice use slightly different titles. Branded
 share is computed from the reporting period's query sample (README's documented
 "top-50 sample" approximation), classifying a query as branded when it
-contains the client's name — an approximation, same as the original template;
-it will not catch every transliteration/spelling variant.
+contains the client's brand name — taken from both ``client.name`` and
+``client.domain``, with the TLD stripped, since a client is often *named* after
+its domain ("onebyone.ua") and that suffix never shows up inside a query. An
+approximation, same as the original template: it will not catch every
+transliteration/spelling variant.
 
 Metrics are keyed by monthly ``Period`` label. A custom range or full-year
 report aggregates several months (see :mod:`periods`): clicks/impressions are
@@ -20,6 +23,7 @@ position-bucket snapshot uses the window's most recent month.
 
 from __future__ import annotations
 
+import re
 import typing
 
 from backend.app.report_builder.block_catalog import BlockType
@@ -45,6 +49,10 @@ _TAB_ALIASES: dict[str, list[str]] = {
 }
 
 _TOP_LIMIT = 20
+
+# A trailing TLD (".ua", ".com", ".co.uk") on a client name/domain.
+_TLD_SUFFIX = re.compile(r"\.[a-z]{2,4}(\.[a-z]{2,3})?$")
+_NON_WORD = re.compile(r"[\W_]+", re.UNICODE)
 
 _num = periods.num
 _int = periods.to_int
@@ -139,17 +147,40 @@ def _daily_rows(tabs: dict, window: Window) -> list[dict[str, object]]:
     return items
 
 
-def _is_branded(query: str, client_name: str) -> bool:
-    normalized_query = (query or "").lower().replace(" ", "")
-    normalized_name = (client_name or "").lower().replace(" ", "")
-    return bool(normalized_name) and normalized_name in normalized_query
+def _squash(value: str) -> str:
+    """Lowercase, drop everything that is not a letter/digit — so "One by One",
+    "one-by-one" and "onebyone" all collapse to the same token."""
+    return _NON_WORD.sub("", (value or "").lower())
 
 
-def _branded_summary(tabs: dict, window: Window, client_name: str) -> dict[str, object]:
+def _brand_terms(client_name: str, domain: str) -> list[str]:
+    """The brand strings to look for in a query.
+
+    A client's *name* in this system frequently carries the domain suffix
+    ("onebyone.ua"), which never appears inside a search query — matching on it
+    verbatim scored every query non-branded. So each of the name and the domain
+    contributes both its full form and its TLD-stripped registrable name.
+    """
+    terms: set[str] = set()
+    for raw in (client_name, domain):
+        text = (raw or "").strip().lower().removeprefix("www.")
+        for candidate in (text, _TLD_SUFFIX.sub("", text)):
+            token = _squash(candidate)
+            if len(token) >= 3:  # too short to match on without false positives
+                terms.add(token)
+    return sorted(terms)
+
+
+def _is_branded(query: str, brand_terms: typing.Sequence[str]) -> bool:
+    squashed = _squash(query)
+    return any(term in squashed for term in brand_terms)
+
+
+def _branded_summary(tabs: dict, window: Window, brand_terms: typing.Sequence[str]) -> dict[str, object]:
     rows = periods.window_rows(tabs.get("GSC Queries", []), window)
     total_clicks = sum(_int(row.get("Clicks")) for row in rows)
     branded_clicks = sum(
-        _int(row.get("Clicks")) for row in rows if _is_branded(row.get("Query", ""), client_name)
+        _int(row.get("Clicks")) for row in rows if _is_branded(row.get("Query", ""), brand_terms)
     )
     share = round((branded_clicks / total_clicks) * 100, 1) if total_clicks else 0.0
     return {
@@ -187,7 +218,7 @@ def _aggregate_items(
     return items
 
 
-def _resolve_summary(tabs: dict, windows: Windows, client_name: str) -> BlockResult:
+def _resolve_summary(tabs: dict, windows: Windows, brand_terms: typing.Sequence[str]) -> BlockResult:
     summary_rows = tabs.get("GSC Summary", [])
     positions_rows = tabs.get("GSC Positions", [])
     current_kpi = _summary_kpi(periods.window_rows(summary_rows, windows.current))
@@ -217,13 +248,15 @@ def _resolve_summary(tabs: dict, windows: Windows, client_name: str) -> BlockRes
             "daily": _daily_rows(tabs, windows.current),
             "daily_previous": _daily_rows(tabs, windows.previous),
             "daily_yoy": _daily_rows(tabs, windows.yoy),
-            "branded": _branded_summary(tabs, windows.current, client_name),
+            "branded": _branded_summary(tabs, windows.current, brand_terms),
+            "branded_previous": _branded_summary(tabs, windows.previous, brand_terms),
+            "branded_yoy": _branded_summary(tabs, windows.yoy, brand_terms),
         }
     )
 
 
-def _resolve_branded_bar(tabs: dict, windows: Windows, client_name: str) -> BlockResult:
-    branded = _branded_summary(tabs, windows.current, client_name)
+def _resolve_branded_bar(tabs: dict, windows: Windows, brand_terms: typing.Sequence[str]) -> BlockResult:
+    branded = _branded_summary(tabs, windows.current, brand_terms)
     if not branded["total_clicks"]:
         return BlockResult.unavailable(f"No query click data found for {windows.current.display}.")
     return BlockResult.ok({"period": windows.current.display, "branded": branded})
@@ -281,11 +314,11 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
     if not windows.current.labels:
         return BlockResult.unavailable("Could not determine the current reporting period from the GSC sheet.")
 
-    client_name = context.client.name or ""
+    brand_terms = _brand_terms(context.client.name or "", context.client.domain or "")
     if block.key == "gsc_summary":
-        return _resolve_summary(tabs, windows, client_name)
+        return _resolve_summary(tabs, windows, brand_terms)
     if block.key == "gsc_branded_bar":
-        return _resolve_branded_bar(tabs, windows, client_name)
+        return _resolve_branded_bar(tabs, windows, brand_terms)
     if block.key == "gsc_top_queries":
         return _resolve_top_queries(tabs, windows)
     return BlockResult.unavailable(f"No GSC resolver for block '{block.key}'.")
