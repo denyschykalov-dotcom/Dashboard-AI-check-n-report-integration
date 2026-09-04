@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import RedirectResponse
 
 from backend.app.api.routes import public_router, router
+from backend.app.config import get_settings
 from backend.app.logging_config import configure_logging
 from backend.app.migrations.runner import run_pending_migrations
 
@@ -22,9 +23,14 @@ configure_logging()
 logger = logging.getLogger("rankberry.backend")
 
 app = FastAPI(title="Rankberry Dashboard API")
+# The dashboard is served from this same app (see the static mount at the
+# bottom), so in production nothing needs CORS at all — the list exists for the
+# Vite dev server, and for a frontend hosted somewhere else. It used to be "*"
+# alongside allow_credentials, which is not a legal pair and let any site on the
+# internet put questions to an API that answers with credentials.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(get_settings().allowed_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

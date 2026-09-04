@@ -4,11 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "build": "tsc -b && vite build --config vite.config.ts",
-    "cleanup": "python3.9 -m backend.app.cleanup",
-    "migrate": "python3.9 -m backend.app.migrations.runner",
-    "start": "python3.9 -m uvicorn backend.app.main:app --host 127.0.0.1 --port 3001 --proxy-headers",
-    "worker": "python3.9 -m backend.app.worker"
+    "build": "tsc -b && vite build",
+    "cleanup": ".venv/bin/python -m backend.app.cleanup",
+    "migrate": ".venv/bin/python -m backend.app.migrations.runner",
+    "start": ".venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 3001 --proxy-headers",
+    "worker": ".venv/bin/python -m backend.app.worker"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.100.0",

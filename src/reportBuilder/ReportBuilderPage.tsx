@@ -169,6 +169,14 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
   const [previewHtml, setPreviewHtml] = useState<string>("");
   const [previewExpanded, setPreviewExpanded] = useState(false);
   const [editingReportId, setEditingReportId] = useState<string | null>(null);
+  // Ticking and dragging both start a render, so several can be in flight at
+  // once and they do not come back in order. Only the newest one may paint.
+  const previewRequest = useRef(0);
+  // Whether the banner currently on screen is a preview complaint, so a render
+  // that works can clear it without wiping an unrelated save error.
+  const previewFailed = useRef(false);
+  // The preview iframe, so a posted message can be checked against it.
+  const previewFrame = useRef<HTMLIFrameElement | null>(null);
 
   const [savedReports, setSavedReports] = useState<ReportSummary[]>([]);
   // `${reportId}:${format}` of the export currently in flight, so only that
@@ -410,6 +418,10 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
   useEffect(() => {
     if (!token || !selectedClientId) return;
     if (selectionLoadedFor.current !== selectedClientId) return;
+    // A reopened report's block list is that report's, not this client's
+    // starting point. Saving it here meant a look at the March report replaced
+    // the blocks the specialist normally builds with.
+    if (editingReportId) return;
     const timeframe = buildTimeframe();
     const handle = window.setTimeout(() => {
       void apiRequest(`/api/report-builder/clients/${selectedClientId}/selection`, {
@@ -428,7 +440,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
       });
     }, 600);
     return () => window.clearTimeout(handle);
-  }, [token, selectedClientId, orderedSelection, buildTimeframe]);
+  }, [token, selectedClientId, orderedSelection, buildTimeframe, editingReportId]);
 
   // Esc leaves the full-screen preview, and the page behind it must not scroll
   // out from under the overlay.
@@ -474,10 +486,10 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
       generated &&
       next.has(key) &&
       !generated.blocks.some((block) => block.block_type_key === key);
-    if (needsData) {
-      const name = catalog.find((block) => block.key === key)?.display_name ?? key;
-      setStatus(`"${name}" has no data yet — press Generate to fetch it.`);
-    }
+    // Cleared on every tick, not only set on the ones that need it — left
+    // standing, the note pointed at a block the specialist had moved on from.
+    const name = catalog.find((block) => block.key === key)?.display_name ?? key;
+    setStatus(needsData ? `"${name}" has no data yet — press Generate to fetch it.` : null);
   }
 
   /** Move one block to `toIndex` in the block list (= the report's order). */
@@ -693,6 +705,11 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
         setPreviewHtml("");
         return;
       }
+      // Claim this render. Anything that comes back after a later one started is
+      // dropped: letting a slow answer paint put the previous set of sections
+      // back on screen, which reads as the checkbox having done nothing.
+      const requestId = (previewRequest.current += 1);
+      const isCurrent = () => requestId === previewRequest.current;
       try {
         const response = await fetch("/api/report-builder/preview", {
           method: "POST",
@@ -706,15 +723,27 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
           }),
         });
         if (response.ok) {
-          setPreviewHtml(await response.text());
+          const rendered = await response.text();
+          if (!isCurrent()) return;
+          setPreviewHtml(rendered);
+          // A render that works clears the last render's complaint — otherwise
+          // one blip left a red banner up over a page that was working fine.
+          if (previewFailed.current) {
+            previewFailed.current = false;
+            setError(null);
+          }
           return;
         }
+        if (!isCurrent()) return;
         // The render is best-effort — the last good one stays on screen and
         // nothing typed is lost. But silence here is indistinguishable from
         // "the button did nothing", which is how a failing preview gets
         // reported as a broken feature, so say what happened.
+        previewFailed.current = true;
         setError(`Preview did not re-render (HTTP ${response.status}). Your edits are kept.`);
       } catch (previewError) {
+        if (!isCurrent()) return;
+        previewFailed.current = true;
         setError(
           `Preview did not re-render (${
             previewError instanceof Error ? previewError.message : "network error"
@@ -952,6 +981,11 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
   // would lose focus/scroll). The preview itself only reloads on a new report.
   useEffect(() => {
     function onMessage(event: MessageEvent) {
+      // Only the preview frame may write into the report. The frame is rendered
+      // from srcDoc, so its origin is opaque and cannot be compared — the window
+      // itself is the identity. Without this, any page that got a handle on this
+      // one could post a note into a document a client reads.
+      if (event.source !== previewFrame.current?.contentWindow) return;
       const data = event.data as
         | { source?: string; kind?: string; key?: string | null; value?: unknown }
         | null;
@@ -1343,8 +1377,18 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
     );
   }
 
+  // One date on its own cannot describe a range, so the backend drops both and
+  // reports the latest month instead. That handed the specialist a different
+  // month than they asked for, with nothing said — so the button waits.
+  const rangeIncomplete =
+    useAdvanced && reportType === "monthly" && Boolean(dateFrom) !== Boolean(dateTo);
+
   const canGenerate =
-    Boolean(selectedClientId) && selectedKeys.size > 0 && !isGenerating && aiStage === null;
+    Boolean(selectedClientId) &&
+    selectedKeys.size > 0 &&
+    !isGenerating &&
+    aiStage === null &&
+    !rangeIncomplete;
 
   return (
     <section className="page active report-builder-page">
@@ -1888,6 +1932,12 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
           {selectedKeys.size === 0 ? (
             <p className="report-hint">Select at least one block to generate a report.</p>
           ) : null}
+          {rangeIncomplete ? (
+            <p className="report-hint">
+              Fill in both dates, or clear both. A single date cannot make a range, so the report
+              would fall back to the latest month available.
+            </p>
+          ) : null}
         </article>
       ) : null}
 
@@ -1930,6 +1980,7 @@ export default function ReportBuilderPage({ token, captureOverviewShot }: Props)
               </button>
             </div>
             <iframe
+              ref={previewFrame}
               className="report-preview-frame"
               title="Report preview"
               srcDoc={previewHtml}

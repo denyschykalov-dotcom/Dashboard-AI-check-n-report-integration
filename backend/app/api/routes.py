@@ -602,7 +602,19 @@ def clear_clickup_token(
     return report_settings_service.get_status(session, current_user.user_id)
 
 
-def _client_language(client: Client) -> str:
+def _filename_safe(value: str) -> str:
+    """A download filename that survives a Content-Disposition header.
+
+    ASCII letters and digits are kept and everything else becomes a dash. Non
+    ASCII has to go as well, not just punctuation: headers are latin-1, so a
+    Cyrillic client name raised a UnicodeEncodeError and the export came back a
+    500 instead of a file.
+    """
+    cleaned = "".join(ch if ch.isascii() and ch.isalnum() else "-" for ch in value)
+    return cleaned.strip("-") or "report"
+
+
+def _client_language(client: Client, *, warm_cache: bool = True) -> str:
     """The client's report language, with its UI vocabulary guaranteed translated.
 
     Reports are authored in English and localized on the way out. The static
@@ -611,9 +623,14 @@ def _client_language(client: Client) -> str:
     but it has to happen before the template is built, because rendering itself
     must never make an API call. Failures are swallowed inside
     ``ensure_ui_translations``: an untranslated label falls back to English.
+
+    ``warm_cache=False`` uses whatever is already cached and never calls Claude.
+    That is for the public share page, which needs no login: filling the cache
+    there let an anonymous visitor start a paid translation, and made them wait
+    on it. A specialist warms the cache on their first render of that language.
     """
     language = localization.normalize_language(client.report_language)
-    if localization.needs_translation(language) and localization.missing_ui_strings(language):
+    if warm_cache and localization.needs_translation(language) and localization.missing_ui_strings(language):
         ai_client = get_ai_commentary_client()
         if ai_client.is_configured:
             localization.ensure_ui_translations(language, ai_client.translate_ui_strings)
@@ -1048,8 +1065,10 @@ def export_report(
     client_domain = client.domain if client else ""
     # An export is the client-facing artifact, so it is rendered in their language.
     language = _client_language(client) if client else localization.DEFAULT_LANGUAGE
-    safe_name = "".join(ch if ch.isalnum() else "-" for ch in client_name).strip("-") or "client"
-    filename_base = f"{safe_name}-{report.period_label}-report"
+    # Both halves are sanitized, not just the name: ``period_label`` is a plain
+    # string on the save request, and a quote or a newline in it would break — or
+    # inject into — the Content-Disposition header a browser reads.
+    filename_base = _filename_safe(f"{client_name}-{report.period_label}-report")
 
     if format == "md":
         document = report_export.build_report_markdown(
@@ -1148,7 +1167,11 @@ def view_shared_report(
         blocks,
         client_name=client.name if client else "Client",
         client_domain=client.domain if client else "",
-        language=_client_language(client) if client else localization.DEFAULT_LANGUAGE,
+        language=(
+            _client_language(client, warm_cache=False)
+            if client
+            else localization.DEFAULT_LANGUAGE
+        ),
     )
     # Rendered in the browser, not downloaded — no Content-Disposition. Told not
     # to cache, so revoking a link takes effect immediately, and kept out of

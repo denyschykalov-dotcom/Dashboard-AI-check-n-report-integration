@@ -44,16 +44,12 @@ dist/
 coverage/
 .vite/
 *.tsbuildinfo
-vite.config.js
-vite.config.d.ts
 
 # Editor and OS noise
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-
-scripts/
 
 tarsco-seo-reports-3fa8ec0b2836.json
 ONEBYO~2.HTM

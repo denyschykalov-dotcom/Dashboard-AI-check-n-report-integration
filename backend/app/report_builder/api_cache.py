@@ -62,6 +62,10 @@ def get_or_fetch(
             logger.warning("api_cache_unreadable key=%s", key)  # refetch below
 
     payload = fetch()
+    # Whether the caller has work of its own in flight, checked before the merge
+    # adds ours. Committing on top of somebody else's open transaction would
+    # write out changes they had not finished making.
+    caller_is_mid_transaction = bool(session.new or session.dirty or session.deleted)
     row = ApiCache(
         cache_key=key,
         payload_json=json.dumps(payload),
@@ -69,6 +73,11 @@ def get_or_fetch(
         created_at=now,
     )
     session.merge(row)
-    session.commit()
+    session.flush()
+    if not caller_is_mid_transaction:
+        # Nothing else is pending, so this row is the whole transaction. It is
+        # committed here rather than left to the caller because a request that
+        # never commits would throw away a pull that has already been billed for.
+        session.commit()
     logger.info("api_cache_stored key=%s ttl_days=%s", key, ttl_days)
     return payload

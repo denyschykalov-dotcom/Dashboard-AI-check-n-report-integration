@@ -21,7 +21,7 @@ Environment=DB_POOL_SIZE=1
 # Idle ceiling for the queue poll. Pickup stays at the 2s base while runs are
 # flowing; only an empty queue backs off this far.
 Environment=QUEUE_POLL_MAX_SECONDS=15
-ExecStart=/srv/rankberry-dashboard/.venv/bin/python3.9 -u -m backend.app.worker
+ExecStart=/srv/rankberry-dashboard/.venv/bin/python -u -m backend.app.worker
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

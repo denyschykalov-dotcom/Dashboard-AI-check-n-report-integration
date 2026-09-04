@@ -16,7 +16,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.db import Base, build_engine
-from backend.app.models import Client, Report, ReportBlock, Run, RunResult
+from backend.app.models import ApiCache, Client, Report, ReportBlock, Run, RunResult
+from backend.app.api import routes as api_routes
+from backend.app.report_builder import api_cache
 from backend.app.report_builder import export as report_export
 from backend.app.report_builder import localization
 from backend.app.report_builder import secrets_crypto
@@ -929,6 +931,77 @@ class AhrefsResolverTests(unittest.TestCase):
         self.assertEqual(mocked.call_count, 8)
         self.assertEqual(again_domain.data, first_domain.data)
         self.assertEqual(again_movers.data, first_movers.data)
+
+    def test_another_client_never_gets_this_ones_numbers(self) -> None:
+        """The key carries the domain. Sharing one entry across clients would put
+        somebody else's traffic in this client's report — the worst outcome the
+        cache can produce, and invisible once the report is sent."""
+        other = _client(self.session, name="Other Co", domain="other.com")
+        other_context = ResolveContext(
+            client=other, period_label="", now=utcnow(), session=self.session
+        )
+        targets: list[str] = []
+
+        def record(endpoint, params):
+            targets.append(params.get("target"))
+            return self._responses[endpoint]
+
+        with patch(
+            "backend.app.report_builder.data_sources.ahrefs.ahrefs_client.get",
+            side_effect=record,
+        ) as mocked:
+            ahrefs.resolve(get_block("ahrefs_domain_analysis"), self._context())
+            first_call_count = mocked.call_count
+            ahrefs.resolve(get_block("ahrefs_domain_analysis"), other_context)
+
+        self.assertEqual(mocked.call_count, first_call_count * 2)
+        self.assertIn("other.com", targets)
+
+    def test_a_different_month_is_pulled_again(self) -> None:
+        """Each month is its own snapshot, so last month's entry must not answer
+        for this one — the report would silently repeat the previous figures."""
+        def context_at(now):
+            return ResolveContext(
+                client=self.client, period_label="", now=now, session=self.session
+            )
+
+        with patch(
+            "backend.app.report_builder.data_sources.ahrefs.ahrefs_client.get",
+            side_effect=self._fake_get,
+        ) as mocked:
+            ahrefs.resolve(
+                get_block("ahrefs_domain_analysis"),
+                context_at(datetime(2026, 7, 15, tzinfo=timezone.utc)),  # → Jun 2026
+            )
+            first_call_count = mocked.call_count
+            ahrefs.resolve(
+                get_block("ahrefs_domain_analysis"),
+                context_at(datetime(2026, 6, 15, tzinfo=timezone.utc)),  # → May 2026
+            )
+        self.assertEqual(mocked.call_count, first_call_count * 2)
+
+    def test_an_expired_entry_is_pulled_again(self) -> None:
+        """The TTL is what lets Ahrefs' revisions to a recent month land."""
+        with patch(
+            "backend.app.report_builder.data_sources.ahrefs.ahrefs_client.get",
+            side_effect=self._fake_get,
+        ) as mocked:
+            ahrefs.resolve(get_block("ahrefs_domain_analysis"), self._context())
+            first_call_count = mocked.call_count
+
+        rows = list(self.session.execute(select(ApiCache)).scalars())
+        self.assertTrue(rows, "the pull should have been stored")
+        for row in rows:
+            row.expires_at = utcnow() - timedelta(days=1)
+        self.session.commit()
+
+        with patch(
+            "backend.app.report_builder.data_sources.ahrefs.ahrefs_client.get",
+            side_effect=self._fake_get,
+        ) as mocked_again:
+            result = ahrefs.resolve(get_block("ahrefs_domain_analysis"), self._context())
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(mocked_again.call_count, first_call_count)
 
     def test_a_failed_pull_is_not_cached(self) -> None:
         """A rate limit must not be stored as this month's answer."""
@@ -1961,6 +2034,18 @@ class PeriodWindowTests(unittest.TestCase):
     def test_parse_selection_requires_both_bounds(self) -> None:
         self.assertIsNone(periods.parse_selection("2026-01-01", None))
         self.assertIsNone(periods.parse_selection(None, None))
+
+    def test_one_date_on_its_own_is_refused_not_quietly_dropped(self) -> None:
+        """Falling back to the latest month here handed back a different month
+        than the caller asked for, and said nothing about it."""
+        with self.assertRaises(ValueError):
+            report_service.resolve_timeframe(utcnow(), date_from="2026-01-01")
+        with self.assertRaises(ValueError):
+            report_service.resolve_timeframe(utcnow(), date_to="2026-01-31")
+
+    def test_no_dates_at_all_still_means_the_latest_month(self) -> None:
+        selection, _ = report_service.resolve_timeframe(utcnow())
+        self.assertIsNone(selection)
 
     def test_window_latest_picks_most_recent_label(self) -> None:
         selection = PeriodSelection(start=date(2026, 1, 1), end=date(2026, 6, 1))
@@ -3121,6 +3206,52 @@ class ReportShareLinkTests(unittest.TestCase):
     def test_sharing_an_unknown_report_is_a_lookup_error(self) -> None:
         with self.assertRaises(LookupError):
             report_service.set_report_share(self.session, report_id=uuid.uuid4(), shared=True)
+
+
+class ExportFilenameTests(unittest.TestCase):
+    """The download name goes into a Content-Disposition header, which is
+    latin-1 and delimited by quotes — so nothing else may reach it."""
+
+    def test_quotes_and_newlines_cannot_reach_the_header(self) -> None:
+        safe = api_routes._filename_safe('Acme "Co"\r\nX-Injected: yes-Jun 2026-report')
+        self.assertNotIn('"', safe)
+        self.assertNotIn("\r", safe)
+        self.assertNotIn("\n", safe)
+
+    def test_a_cyrillic_client_name_does_not_500_the_export(self) -> None:
+        safe = api_routes._filename_safe("Клієнт-Jun 2026-report")
+        safe.encode("latin-1")  # what Starlette does with a header value
+        self.assertIn("Jun", safe)
+
+    def test_a_name_made_only_of_punctuation_still_has_something_left(self) -> None:
+        self.assertEqual(api_routes._filename_safe("!!! ???"), "report")
+
+
+class ApiCacheTransactionTests(unittest.TestCase):
+    """Storing a pull must not commit whatever else the caller had open."""
+
+    def setUp(self) -> None:
+        self.session = _make_session()
+        self.client = _client(self.session, name="Acme Co", domain="acme.com")
+
+    def test_the_callers_unfinished_work_is_left_alone(self) -> None:
+        self.client.name = "Half-typed name"  # dirty, not committed
+        api_cache.get_or_fetch(self.session, "k1", lambda: {"v": 1})
+        self.session.rollback()
+        self.assertEqual(self.client.name, "Acme Co")
+
+    def test_a_pull_on_a_clean_session_is_committed_on_its_own(self) -> None:
+        api_cache.get_or_fetch(self.session, "k2", lambda: {"v": 2})
+        self.session.rollback()  # would drop the row if it had not been committed
+        self.assertIsNotNone(self.session.get(ApiCache, "k2"))
+
+    def test_a_failing_pull_stores_nothing(self) -> None:
+        def boom() -> dict:
+            raise RuntimeError("rate limited")
+
+        with self.assertRaises(RuntimeError):
+            api_cache.get_or_fetch(self.session, "k3", boom)
+        self.assertIsNone(self.session.get(ApiCache, "k3"))
 
 
 if __name__ == "__main__":

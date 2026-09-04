@@ -228,6 +228,12 @@ def resolve_timeframe(
     selection = periods.parse_period_preset(preset, now)
     if selection is not None:
         return selection, periods.normalize_comparisons(chosen)
+    # ``parse_selection`` needs both bounds and returns None without them, which
+    # lands on the "latest month present" default. That is right for no dates at
+    # all and wrong for one: the caller asked for a window and would be handed a
+    # different month with nothing said.
+    if bool(date_from) != bool(date_to):
+        raise ValueError("Enter both a start and an end date for a custom range, or neither.")
     return (
         periods.parse_selection(date_from, date_to, report_type),
         periods.normalize_comparisons(chosen or list(periods.COMPARISON_MODES)),

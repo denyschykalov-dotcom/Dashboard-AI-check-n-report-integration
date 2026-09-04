@@ -27,6 +27,23 @@ def _read_env(name: str, default: typing.Optional[str] = None) -> typing.Optiona
     return value or default
 
 
+# The Vite dev server, which is the only origin that is not the API's own.
+_DEFAULT_ALLOWED_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
+
+
+def _split_origins(raw: typing.Optional[str]) -> tuple[str, ...]:
+    """``ALLOWED_ORIGINS`` as a list, falling back to the dev server.
+
+    A comma-separated list of exact origins, e.g.
+    ``https://dashboard.example.com,http://localhost:5173``. ``*`` is accepted
+    for a deliberately open deployment, but it is not the default: the API
+    answers with credentials, and every browser on the internet was allowed to
+    ask it questions.
+    """
+    origins = tuple(part.strip() for part in (raw or "").split(",") if part.strip())
+    return origins or _DEFAULT_ALLOWED_ORIGINS
+
+
 def _derive_supabase_url(database_url: typing.Optional[str]) -> typing.Optional[str]:
     if not database_url:
         return None
@@ -98,6 +115,10 @@ class Settings:
     report_summary_prompt_file: Path
     report_translate_prompt_file: Path
     report_search_industry_prompt_file: Path
+    # The browser origins allowed to call the API. Last, and with a default, so
+    # every caller that builds a Settings by hand gets the closed list rather
+    # than having to know about it.
+    allowed_origins: tuple[str, ...] = _DEFAULT_ALLOWED_ORIGINS
 
 
 @lru_cache(maxsize=1)
@@ -126,6 +147,7 @@ def get_settings() -> Settings:
     ).strip().lower()
 
     return Settings(
+        allowed_origins=_split_origins(_read_env("ALLOWED_ORIGINS")),
         database_url=runtime_database_url,
         migration_database_url=migration_database_url,
         db_pool_mode=_read_env("DB_POOL_MODE", "null") or "null",
