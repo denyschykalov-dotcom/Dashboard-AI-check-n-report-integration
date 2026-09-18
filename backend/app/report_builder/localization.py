@@ -188,6 +188,9 @@ UI_STRINGS: tuple[str, ...] = (
     "Purchase funnel —",
     "Funnel detail",
     "Stage",
+    "All channels",
+    "Other channels",
+    "of all revenue",
     "Contributors",
     "AI-Revenue",
     "AI revenue",
@@ -250,6 +253,7 @@ UI_STRINGS: tuple[str, ...] = (
     "Planned works",
     "Task",
     "Due",
+    "task link",
     "No planned tasks for the next period.",
     # The count line that opens each of the two work sections; the number itself
     # sits in its own element, so only the trailing phrase is a translatable key.

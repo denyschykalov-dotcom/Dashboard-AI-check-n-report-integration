@@ -164,11 +164,17 @@ def _ga4_kpi(k: typing.Optional[dict]) -> dict:
 
 def _ecom_kpi(k: typing.Optional[dict]) -> dict:
     if not k:
-        return {"purchases": 0, "revenue": 0, "addToCart": 0, "checkouts": 0}
+        return {"sessions": 0, "purchases": 0, "revenue": 0, "addToCart": 0, "checkouts": 0}
     return {
+        "sessions": _num(k.get("sessions")),
         "purchases": _num(k.get("purchases")), "revenue": _num(k.get("revenue")),
         "addToCart": _num(k.get("add_to_carts")), "checkouts": _num(k.get("checkouts")),
     }
+
+
+def _ecom_channel(rows: typing.Optional[list]) -> list[dict]:
+    """A channel breakdown row: the same five figures plus the channel's name."""
+    return [dict(_ecom_kpi(r), channel=r.get("label", "")) for r in (rows or [])]
 
 
 def _ai_kpi(k: typing.Optional[dict]) -> dict:
@@ -374,14 +380,20 @@ def _build_data(
     if "ga4_monetization" in ok:
         sw = ok["ga4_monetization"].get("site_wide") or {}
         ai_ec = ok["ga4_monetization"].get("ai") or {}
+        by_channel = ok["ga4_monetization"].get("by_channel") or {}
         data["ecom"] = {}
         data["aiEcom"] = {}
+        # The monetization block is read channel by channel (one tab each), so
+        # every comparison period needs its own breakdown, not just the current
+        # one — that is what the per-channel deltas are drawn from.
+        data["ecomByChannel"] = {}
         for pk, sub in (("cur", "current"), ("prev", "previous"), ("yoy", "yoy")):
             k = P.get(pk)
             if not k:
                 continue
             data["ecom"][k] = _ecom_kpi(sw.get(sub))
             data["aiEcom"][k] = _ecom_kpi(ai_ec.get(sub))
+            data["ecomByChannel"][k] = _ecom_channel(by_channel.get(sub))
 
     # -- GA4 AI traffic (b8) --
     if "ga4_ai_traffic" in ok:
@@ -530,8 +542,9 @@ def _build_data(
         data["ahrefsLosers"] = mover(d.get("losers", []))
 
     # -- ClickUp work (b12/b13) --
-    # Each completed-work row is [task, task_id]: the task title is what the client
-    # reads, and the ClickUp id links back to it. The Summary/description and
+    # Each completed-work row is [task, task_id, last_comment]: the task title is
+    # what the client reads, the newest ClickUp comment says what was actually
+    # done, and the id links back to it. The Summary/description and
     # tracked-time columns were dropped from this block — tracked time is still
     # what decides which month a task belongs to (see clickup._done_tasks), it just
     # isn't reported.
@@ -554,7 +567,7 @@ def _build_data(
     def tasks(source_key):
         d = ok.get(source_key) or {}
         return [
-            [t.get("name", ""), _task_id(t.get("url", ""))]
+            [t.get("name", ""), _task_id(t.get("url", "")), t.get("comment", "")]
             for t in _kept(source_key, d.get("tasks", []))
         ]
     # Planned works (the ClickUp "Todo" stage) renders as a numbered plan rather
@@ -570,6 +583,7 @@ def _build_data(
                 "name": t.get("name", ""),
                 "taskId": _task_id(t.get("url", "")),
                 "due": t.get("due_date") or "",
+                "comment": t.get("comment", ""),
             })
         return out
     if "work_completed" in ok:
@@ -1209,8 +1223,11 @@ def _md_se_ranking(data: dict) -> str:
 
 
 def _md_work_done(data: dict) -> str:
-    rows = [[r[0], r[1] if len(r) > 1 else ""] for r in (data.get("workDone") or [])]
-    return _md_table(["Task", "ID"], rows)
+    rows = [
+        [r[0], r[2] if len(r) > 2 else "", r[1] if len(r) > 1 else ""]
+        for r in (data.get("workDone") or [])
+    ]
+    return _md_table(["Task", "Last comment", "ID"], rows)
 
 
 def _md_planned_work(data: dict) -> str:
@@ -1224,6 +1241,8 @@ def _md_planned_work(data: dict) -> str:
     for item in items:
         due = f" — due {item.get('due')}" if item.get("due") else ""
         lines.append(f"- **{item.get('name', '')}**{due} [#{item.get('taskId', '')}]")
+        if item.get("comment"):
+            lines.append(f"  {item['comment']}")
     return "\n".join(lines)
 
 

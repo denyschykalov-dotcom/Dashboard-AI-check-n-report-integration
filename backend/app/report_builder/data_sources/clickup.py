@@ -234,6 +234,36 @@ def _tracked_months(context: ResolveContext, token: str, task_id: str) -> set[tu
     return months
 
 
+def _last_comment(context: ResolveContext, token: str, task_id: str) -> str:
+    """The newest comment on a task, verbatim, or "" when it has none.
+
+    This is what the report prints under the task: whoever worked it leaves the
+    what-and-why in the last comment, so it is carried across unedited.
+
+    Costs one API call per listed task. Unlike tracked time, a comment decides
+    nothing — a failed read drops the text rather than failing the section.
+    """
+    cache_key = ("clickup_task_comment", task_id)
+    if cache_key in context.cache:
+        return context.cache[cache_key]
+
+    try:
+        comments = clickup_client.fetch_task_comments(token, task_id) if task_id else []
+    except ClickUpAccessError:
+        comments = []
+
+    def posted_at(comment: dict) -> int:
+        try:
+            return int(comment.get("date") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    latest = max(comments, key=posted_at) if comments else None
+    text = str((latest or {}).get("comment_text") or "").strip()
+    context.cache[cache_key] = text
+    return text
+
+
 def _status_name(task: dict) -> str:
     """A task's ClickUp status, normalized for comparison.
 
@@ -264,6 +294,7 @@ def _done_tasks(
         if not _tracked_months(context, token, str(task.get("id") or "")) & period_months:
             continue
         summary = _task_summary(task)
+        summary["comment"] = _last_comment(context, token, str(task.get("id") or ""))
         try:
             summary["time_spent_ms"] = int(task.get("time_spent") or 0)
         except (TypeError, ValueError):
@@ -273,9 +304,18 @@ def _done_tasks(
     return items
 
 
-def _todo_tasks(tasks: list[dict]) -> list[dict[str, object]]:
+def _todo_tasks(
+    context: ResolveContext, token: str, tasks: list[dict]
+) -> list[dict[str, object]]:
     """Tasks in the "Todo" status — plans carried into the next period."""
-    return [_task_summary(task) for task in tasks if _status_name(task) == _TODO_STATUS_NAME]
+    items = []
+    for task in tasks:
+        if _status_name(task) != _TODO_STATUS_NAME:
+            continue
+        summary = _task_summary(task)
+        summary["comment"] = _last_comment(context, token, str(task.get("id") or ""))
+        items.append(summary)
+    return items
 
 
 def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
@@ -316,7 +356,7 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
             "tasks": items,
         })
     if block.key == "planned_works":
-        items = _todo_tasks(tasks)
+        items = _todo_tasks(context, str(data["token"]), tasks)
         log_event(
             logger,
             "clickup_block",

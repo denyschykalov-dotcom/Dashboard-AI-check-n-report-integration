@@ -145,14 +145,26 @@ def _source_label(row: dict[str, str]) -> str:
     return re.sub(r"\s+", " ", str(row.get("Source") or "")).strip().lower()
 
 
-def _rollup_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
-    """A per-source tab's "ALL AI ASSISTANTS" rows, else the rows unchanged.
+def _scope(row: dict[str, str]) -> str:
+    return str(row.get("Scope") or "").strip().lower()
 
-    Returned as a list, not one row: a multi-month window holds one roll-up row
-    per month and those do still need summing. A tab with no Source column, or
-    one with no roll-up row in it, is passed through — there is nothing to
-    double-count.
+
+def _rollup_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """The rows that total a tab, else the rows unchanged.
+
+    Two shapes say "this is the total". The ecommerce tab breaks the month out
+    by channel and marks its own site-wide line ``Scope = TOTAL`` — summing the
+    whole tab would count every sale twice (once in TOTAL, once in its channel)
+    and again for the SUBTOTAL lines. The AI tabs instead carry one
+    "ALL AI ASSISTANTS" row per month.
+
+    Returned as a list, not one row: a multi-month window holds one total row
+    per month and those do still need summing. A tab with neither marker is
+    passed through — there is nothing to double-count.
     """
+    total = [row for row in rows if _scope(row) == "total"]
+    if total:
+        return total
     rollup = [row for row in rows if _source_label(row) == _ALL_AI_SOURCE]
     return rollup or rows
 
@@ -161,12 +173,40 @@ def _ecommerce_kpi(rows: list[dict[str, str]]) -> typing.Optional[dict[str, obje
     if not rows:
         return None
     rows = _rollup_rows(rows)
+    return _ecommerce_metrics(rows)
+
+
+def _ecommerce_metrics(rows: list[dict[str, str]]) -> dict[str, object]:
+    """The five ecommerce figures, summed over whatever rows are handed in.
+
+    Sessions are absent from the older tab shapes (and from the AI one), which
+    reads as zero — the report then just leaves the conversion rate off.
+    """
     return {
+        "sessions": periods.sum_int(rows, "Sessions"),
         "purchases": periods.sum_int(rows, "Purchases"),
         "revenue": periods.sum_float(rows, "Revenue"),
         "add_to_carts": periods.sum_int(rows, "Add to Carts"),
         "checkouts": periods.sum_int(rows, "Checkouts"),
     }
+
+
+def _ecommerce_channels(rows: list[dict[str, str]]) -> list[dict[str, object]]:
+    """One ecommerce row per channel, biggest revenue first.
+
+    Only the CHANNEL-scoped rows split the month up: the same tab also holds the
+    site's TOTAL line and its "Organic:" SUBTOTAL, which are the month over
+    again under another name.
+    """
+    channels = [
+        dict(_ecommerce_metrics(group), **{"label": label})
+        for label, group in periods.group_by(
+            [row for row in rows if _scope(row) == "channel"], "Channel"
+        ).items()
+        if label
+    ]
+    channels.sort(key=lambda item: item["revenue"], reverse=True)
+    return channels
 
 
 def _currency_of(*row_groups: list[dict[str, str]]) -> str:
@@ -324,6 +364,9 @@ def _resolve_top_pages(tabs: dict, windows: Windows) -> BlockResult:
 def _resolve_monetization(tabs: dict, windows: Windows) -> BlockResult:
     site_rows = tabs.get("GA4 Ecommerce", [])
     organic_rows = tabs.get("GA4 Ecommerce Organic", [])
+    # Sales split by channel: the ecommerce tab's CHANNEL-scoped rows. Absent
+    # from sheets written by an older collector; the report then shows the
+    # site-wide figures alone, as it always did.
     # AI-driven sales: purchases/revenue attributed to AI-assistant referrers,
     # read from the client sheet's "GA4 AI Ecommerce" tab. Absent for clients
     # whose collector doesn't yet populate it — the section then renders empty.
@@ -347,6 +390,14 @@ def _resolve_monetization(tabs: dict, windows: Windows) -> BlockResult:
                 "current": _ecommerce_kpi(periods.window_rows(site_rows, windows.current)),
                 "previous": _ecommerce_kpi(periods.window_rows(site_rows, windows.previous)),
                 "yoy": _ecommerce_kpi(periods.window_rows(site_rows, windows.yoy)),
+            },
+            "by_channel": {
+                key: _ecommerce_channels(periods.window_rows(site_rows, window))
+                for key, window in (
+                    ("current", windows.current),
+                    ("previous", windows.previous),
+                    ("yoy", windows.yoy),
+                )
             },
             "organic": {
                 "current": _ecommerce_kpi(periods.window_rows(organic_rows, windows.current)),

@@ -292,6 +292,15 @@ def fetch_task_time(token: str, task_id: str) -> list[dict]:
     return _get(token, f"task/{task_id}/time").get("data", []) or []
 
 
+def fetch_task_comments(token: str, task_id: str) -> list[dict]:
+    """Comments on one task, newest first (ClickUp's own order).
+
+    Only the newest one is ever read, but the endpoint has no "latest" mode —
+    it answers with a page of them and a ``date`` on each.
+    """
+    return _get(token, f"task/{task_id}/comment").get("comments", []) or []
+
+
 def fetch_tasks(token: str, list_id: str) -> list[dict]:
     """All tasks in a list, including closed ones, paging through results."""
 

@@ -509,6 +509,54 @@ class GA4SheetResolverTests(unittest.TestCase):
         ]
         self.assertEqual(ga4._ecommerce_kpi(rows)["purchases"], 30)
 
+    def test_a_scoped_ecommerce_tab_reports_its_total_not_the_sum_of_its_rows(self) -> None:
+        """The collector now writes the month once per channel plus a TOTAL line.
+
+        Summing the whole window counted every sale twice — once in TOTAL and
+        once in its channel — and again for the "Organic:" SUBTOTAL line.
+        """
+        fixture = _ga4_sheet_fixture()
+        fixture["GA4 Ecommerce"] = [
+            ["Period", "Scope", "Channel", "Sessions", "Purchases", "Revenue",
+             "Add to Carts", "Checkouts", "Currency"],
+            ["Jun 2026", "TOTAL", "ALL SOURCES", "1000", "100", "5000", "400", "200", "UAH"],
+            ["Jun 2026", "CHANNEL", "Paid Search", "600", "70", "3500", "250", "140", "UAH"],
+            ["Jun 2026", "CHANNEL", "Organic Search", "300", "25", "1200", "120", "50", "UAH"],
+            ["Jun 2026", "CHANNEL", "AI Assistant", "100", "5", "300", "30", "10", "UAH"],
+            ["Jun 2026", "SUBTOTAL", "Organic: Organic Search", "", "25", "1200", "120", "50", "UAH"],
+        ]
+        with _patched_ga4_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = ga4.resolve(get_block("ga4_monetization"), self._context())
+        current = result.data["site_wide"]["current"]
+        self.assertEqual(current["purchases"], 100)
+        self.assertEqual(current["sessions"], 1000)
+        self.assertAlmostEqual(current["revenue"], 5000.0)
+
+    def test_monetization_splits_sales_by_channel(self) -> None:
+        """One row per channel, biggest revenue first."""
+        fixture = _ga4_sheet_fixture()
+        fixture["GA4 Ecommerce"] = [
+            ["Period", "Scope", "Channel", "Sessions", "Purchases", "Revenue",
+             "Add to Carts", "Checkouts", "Currency"],
+            ["Jun 2026", "TOTAL", "ALL SOURCES", "1000", "100", "5000", "400", "200", "UAH"],
+            ["Jun 2026", "CHANNEL", "Organic Search", "300", "25", "1200", "120", "50", "UAH"],
+            ["Jun 2026", "CHANNEL", "Paid Search", "600", "70", "3500", "250", "140", "UAH"],
+        ]
+        with _patched_ga4_sheet(fixture=fixture, tab_titles=set(fixture.keys())):
+            result = ga4.resolve(get_block("ga4_monetization"), self._context())
+        channels = result.data["by_channel"]["current"]
+        self.assertEqual([c["label"] for c in channels], ["Paid Search", "Organic Search"])
+        self.assertEqual(channels[0]["purchases"], 70)
+        self.assertEqual(channels[0]["sessions"], 600)
+        # The TOTAL and SUBTOTAL lines are not channels and never get a tab.
+        self.assertNotIn("ALL SOURCES", [c["label"] for c in channels])
+
+    def test_an_older_ecommerce_tab_has_no_channel_split(self) -> None:
+        """A sheet the updated collector never touched still reports site-wide."""
+        with _patched_ga4_sheet():
+            result = ga4.resolve(get_block("ga4_monetization"), self._context())
+        self.assertEqual(result.data["by_channel"]["current"], [])
+
     def test_the_rollup_row_is_not_charted_as_an_ai_tool(self) -> None:
         fixture = _ga4_sheet_fixture()
         fixture["GA4 AI Traffic"] = [
@@ -1393,7 +1441,7 @@ class ServiceGenerateWithSheetsTests(unittest.TestCase):
         ), patch(
             "backend.app.report_builder.data_sources.clickup_client.fetch_task_time",
             return_value=june_time,
-        ):
+        ), _patched_clickup_comments():
             result = report_service.generate(
                 session,
                 client_id=client.id,
@@ -1457,7 +1505,7 @@ class ServiceGenerateWithSheetsTests(unittest.TestCase):
                 "intervals": [{"start": "1785542340000", "time": "120000"}]}],
     }
 
-    def _resolve_completed(self, tasks, period_label="Jul 2026", entries=None):
+    def _resolve_completed(self, tasks, period_label="Jul 2026", entries=None, comments=None):
         entries = self._TIME_ENTRIES if entries is None else entries
         session = _make_session()
         user_id = uuid.uuid4()
@@ -1476,7 +1524,7 @@ class ServiceGenerateWithSheetsTests(unittest.TestCase):
         ), patch(
             "backend.app.report_builder.data_sources.clickup_client.fetch_task_time",
             side_effect=lambda token, task_id: entries.get(task_id, []),
-        ) as task_time:
+        ) as task_time, _patched_clickup_comments(comments or {}):
             return clickup.resolve(get_block("work_completed"), context), task_time
 
     def test_work_completed_lists_only_done_tasks_worked_on_in_the_month(self) -> None:
@@ -1504,6 +1552,35 @@ class ServiceGenerateWithSheetsTests(unittest.TestCase):
         result, _ = self._resolve_completed(self._done_tasks_fixture(), entries={})
         self.assertEqual(result.data["count"], 0)
         self.assertEqual(result.status, "ok", "an empty section is not a failed block")
+
+    def test_a_task_carries_its_newest_comment_verbatim(self) -> None:
+        """The last comment is where whoever worked the task wrote what was done,
+        so it is carried across unedited — and "last" is by date, not by the
+        order ClickUp happened to answer in."""
+        result, _ = self._resolve_completed(
+            self._done_tasks_fixture(),
+            comments={"t1": [
+                {"date": "1783641600000", "comment_text": "Draft sent for review."},
+                {"date": "1783900000000", "comment_text": "Published on 3 blogs, DR 40+."},
+                {"date": "1783700000000", "comment_text": "Review done."},
+            ]},
+        )
+        by_name = {t["name"]: t for t in result.data["tasks"]}
+        self.assertEqual(by_name["Guest post writing"]["comment"], "Published on 3 blogs, DR 40+.")
+        self.assertEqual(by_name["August retainer work"]["comment"], "", "no comments, no text")
+
+    def test_an_unreadable_comment_is_dropped_not_raised(self) -> None:
+        """Unlike tracked time, a comment decides nothing — losing one is not
+        worth dropping the whole section over."""
+        def _boom(token, task_id):
+            raise ClickUpAccessError("rate limited")
+
+        context = SimpleNamespace(cache={})
+        with patch(
+            "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_task_comments",
+            side_effect=_boom,
+        ):
+            self.assertEqual(clickup._last_comment(context, "pk_x", "t1"), "")
 
     def test_work_completed_reads_each_done_task_time_once(self) -> None:
         """One time-entry call per DONE task — the in-progress one is never asked
@@ -1534,7 +1611,7 @@ class ServiceGenerateWithSheetsTests(unittest.TestCase):
         ), patch(
             "backend.app.report_builder.data_sources.clickup_client.fetch_task_time",
             side_effect=_boom,
-        ):
+        ), _patched_clickup_comments():
             result = clickup.resolve(get_block("work_completed"), context)
         self.assertEqual(result.status, "unavailable")
         self.assertIn("tracked time", result.unavailable_reason)
@@ -2124,6 +2201,15 @@ def _patched_clickup_time(entries=None):
     )
 
 
+def _patched_clickup_comments(comments=None):
+    """Stub the per-task comment read. Every listed task asks for one."""
+    comments = comments or {}
+    return patch(
+        "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_task_comments",
+        side_effect=lambda token, task_id: comments.get(task_id, []),
+    )
+
+
 class ClickUpResolverTests(unittest.TestCase):
     def setUp(self) -> None:
         self.session = _make_session()
@@ -2157,7 +2243,7 @@ class ClickUpResolverTests(unittest.TestCase):
         ), patch(
             "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
             return_value=_clickup_tasks_fixture(),
-        ) as mocked_fetch, _patched_clickup_time():
+        ) as mocked_fetch, _patched_clickup_time(), _patched_clickup_comments():
             completed = clickup.resolve(get_block("work_completed"), context)
             planned = clickup.resolve(get_block("planned_works"), context)
 
@@ -2188,7 +2274,7 @@ class ClickUpResolverTests(unittest.TestCase):
         ), patch(
             "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
             return_value=_clickup_tasks_fixture(),
-        ), _patched_clickup_time():
+        ), _patched_clickup_time(), _patched_clickup_comments():
             completed = clickup.resolve(get_block("work_completed"), context)
             planned = clickup.resolve(get_block("planned_works"), context)
 
@@ -2393,7 +2479,7 @@ class ClickUpRangeTests(unittest.TestCase):
         ), patch(
             "backend.app.report_builder.data_sources.clickup.clickup_client.fetch_tasks",
             return_value=_clickup_tasks_fixture(),
-        ), _patched_clickup_time():
+        ), _patched_clickup_time(), _patched_clickup_comments():
             return clickup.resolve(get_block("work_completed"), self._context(selection))
 
     def test_done_task_counts_when_the_range_covers_its_tracked_month(self) -> None:
@@ -2558,7 +2644,7 @@ class PlannedWorkManualTests(unittest.TestCase):
 
 
 class TaskTableExportTests(unittest.TestCase):
-    def test_task_rows_carry_only_the_title_and_id(self) -> None:
+    def test_task_rows_carry_the_title_id_and_last_comment(self) -> None:
         import json as _json
         import re as _re
 
@@ -2573,6 +2659,7 @@ class TaskTableExportTests(unittest.TestCase):
                 {"block_type_key": "work_completed", "status": "ok", "comment": "", "data": {
                     "list_name": "acme", "count": 2, "total_time_spent_ms": 12600000, "tasks": [
                         {"name": "Publish blog post", "description": "Wrote and published the spring guide.",
+                         "comment": "Published 12 Jun, indexed the same day.",
                          "url": "https://app.clickup.com/t/abc", "time_spent_ms": 12600000},
                         {"name": "Fix meta tags", "description": "", "url": "https://app.clickup.com/t/def"},
                     ]},
@@ -2589,10 +2676,12 @@ class TaskTableExportTests(unittest.TestCase):
         self.assertIn("<title>Acme Co — SEO Report — June 2026</title>", doc)
         data = _json.loads(raw)
         rows = data["workDone"]
-        # [task, id] and nothing else: the ClickUp description and the tracked
-        # time are deliberately not reported in this section.
-        self.assertEqual(rows[0], ["Publish blog post", "abc"])
-        self.assertEqual(rows[1], ["Fix meta tags", "def"])
+        # [task, id, last comment] and nothing else: the newest ClickUp comment
+        # says what was done, while the description and the tracked time are
+        # deliberately not reported in this section. A task nobody commented on
+        # still carries its two other fields.
+        self.assertEqual(rows[0], ["Publish blog post", "abc", "Published 12 Jun, indexed the same day."])
+        self.assertEqual(rows[1], ["Fix meta tags", "def", ""])
         self.assertNotIn("workDoneTotal", data)
 
     @staticmethod

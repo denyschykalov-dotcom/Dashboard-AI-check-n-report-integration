@@ -233,6 +233,8 @@ tbody tr:hover{background:#FBFCFE}
 .planlist .pi-body{grid-column:2;min-width:0}
 .planlist .pi-name{font-size:calc(14.5px * var(--sec-scale,1));font-weight:700;color:var(--ink);
   line-height:1.4}
+.planlist .pi-desc{margin-top:6px;font-size:calc(13px * var(--sec-scale,1));color:var(--muted);
+  line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
 .planlist .pi-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
 /* Preview-only: strike a wrong ClickUp task off a section. Rendered only when
    DATA.editable, so the client version never carries these controls. */
@@ -363,10 +365,8 @@ th.tr-rm-c,td.tr-rm-c{width:30px;text-align:center;padding-left:0;padding-right:
       <span class="scope">Scope: all channels (site-wide)</span></h2>
     <div class="scoregrid" id="ecScore" style="grid-template-columns:repeat(5,1fr)"></div>
     <div class="card pad" style="margin-top:16px">
-      <div class="cols">
-        <div><div class="chart-title">Purchase funnel — <span class="cur-lbl"></span></div><div id="ecFunnel"></div></div>
-        <div><div class="chart-title">Funnel detail</div><div id="ecTable"></div></div>
-      </div>
+      <div class="tabs" id="ecTabs"></div>
+      <div id="ecPanes"></div>
     </div>
     <div id="aiRevenueWrap" style="margin-top:16px;display:none">
       <h2 class="blk-title"><span class="dot" style="background:var(--teal)"></span>AI-Revenue
@@ -491,10 +491,11 @@ const KEY_BY_SEC = {}, SEC_BY_KEY = {};
 // swaps the labels. Keys are the English strings themselves, so anything the map
 // doesn't cover simply stays English instead of breaking.
 const I18N = DATA.i18n || null;
-// Never rewrite text the specialist typed or Claude wrote — those are already in
-// the target language, and a comment that happened to match a label would
-// otherwise be mangled.
-const _NO_I18N = '.cc-body,.summary-card,#summary,#industry,.planned-manual,[contenteditable="true"]';
+// Never rewrite text the specialist typed, Claude wrote, or ClickUp carried over
+// (.pi-desc holds a task's last comment verbatim) — those are already in the
+// target language, and a comment that happened to match a label would otherwise
+// be mangled.
+const _NO_I18N = '.cc-body,.summary-card,#summary,#industry,.planned-manual,.pi-desc,[contenteditable="true"]';
 // This script and the DATA payload live inside <body>, so their own source is
 // walkable text — rewriting it would corrupt the embedded JSON and the inline JS.
 const _SKIP_TAGS = {SCRIPT:1, STYLE:1, NOSCRIPT:1, TEXTAREA:1, TITLE:1};
@@ -990,32 +991,116 @@ function renderLanding(){
     <td class="r">${fnum(r.engaged)}</td><td class="r">${r.bounce.toFixed(1)}%</td></tr>`,
     `<thead><tr><th>Landing page</th><th class="r">Sessions</th><th class="r">vs ${LBL[cmp()]}</th><th class="r">Engaged</th><th class="r">Bounce</th></tr></thead>`);
 }
-function renderEcom(){
-  const c=DATA.ecom[P.cur], p=cmpBucket(DATA.ecom,c);
+// ── Monetization ────────────────────────────────────────────────────────────
+// The score row above the tabs is the whole site, as it always was. Below it the
+// block is read channel by channel: the biggest channels get a tab each, the AI
+// assistants always get one (that is the channel this report exists to grow),
+// and everything else folds into "Other channels". Each pane is a real .tabpane,
+// which is also what makes print show them all at once — the stylesheet unhides
+// tabpanes when printing.
+const EC_ZERO={sessions:0,purchases:0,revenue:0,addToCart:0,checkouts:0};
+const EC_TAB_LIMIT=5;               // channels given a tab of their own, by revenue
+const EC_AI_CHANNEL='AI Assistant'; // pinned a tab even when it is a small one
+function ecTotals(period){ return Object.assign({},EC_ZERO,(DATA.ecom&&DATA.ecom[period])||{}); }
+function ecChannelRows(period){ return (DATA.ecomByChannel&&DATA.ecomByChannel[period])||[]; }
+function ecChannelRow(period, channel){
+  return Object.assign({channel:channel},EC_ZERO,
+    ecChannelRows(period).find(r=>r.channel===channel)||{});
+}
+// Everything without a tab of its own, added up into one row.
+function ecOtherRow(period, named){
+  return ecChannelRows(period).filter(r=>named.indexOf(r.channel)===-1)
+    .reduce((a,r)=>({channel:'Other channels', sessions:a.sessions+r.sessions,
+      purchases:a.purchases+r.purchases, revenue:a.revenue+r.revenue,
+      addToCart:a.addToCart+r.addToCart, checkouts:a.checkouts+r.checkouts}),
+      Object.assign({channel:'Other channels'},EC_ZERO));
+}
+// The tabs for this period: all channels, then the biggest ones, then AI, then
+// the rest as one. A channel with no sales this period gets no tab.
+function ecTabs(){
+  const cur=P.cur, tot=ecTotals(cur);
+  const live=ecChannelRows(cur).filter(r=>r.revenue>0||r.purchases>0);
+  const named=live.slice(0,EC_TAB_LIMIT).map(r=>r.channel);
+  if(named.indexOf(EC_AI_CHANNEL)<0 && live.some(r=>r.channel===EC_AI_CHANNEL))
+    named.push(EC_AI_CHANNEL);
+  const tabs=[{id:'all', label:'All channels', cur:tot, prev:cmpBucket(DATA.ecom,tot)}].concat(
+    named.map(ch=>({id:ch, label:ch, cur:ecChannelRow(cur,ch), prev:ecChannelRow(cmp(),ch)})));
+  const other=ecOtherRow(cur,named);
+  if(other.revenue>0||other.purchases>0)
+    tabs.push({id:'__other', label:'Other channels', cur:other, prev:ecOtherRow(cmp(),named)});
+  return tabs;
+}
+// The five KPI cards, for the site or for one channel. A channel also gets its
+// share of the site's revenue, which is the number the tabs exist to compare.
+function ecScoreHTML(c, p, totalRev){
   const aov=c.purchases?c.revenue/c.purchases:0, aovP=p.purchases?p.revenue/p.purchases:0;
   const cr=c.checkouts?c.purchases/c.checkouts*100:0, crP=p.checkouts?p.purchases/p.checkouts*100:0;
-  document.getElementById('ecScore').innerHTML=
-    scEl('Number of sales', fnum(c.purchases), deltaHTML(c.purchases,p.purchases))+
-    scEl('Revenue', moneyAbbr(c.revenue), deltaHTML(c.revenue,p.revenue))+
+  const share=totalRev?c.revenue/totalRev*100:0;
+  return scEl('Number of sales', fnum(c.purchases), deltaHTML(c.purchases,p.purchases))+
+    scEl('Revenue', moneyAbbr(c.revenue), deltaHTML(c.revenue,p.revenue),
+         totalRev?share.toFixed(1)+'% of all revenue':'')+
     scEl('Avg order value', money(aov), deltaHTML(aov,aovP))+
     scEl('Add to cart', fnum(c.addToCart), deltaHTML(c.addToCart,p.addToCart))+
     scEl('Checkout→Purchase', cr.toFixed(1)+'%', ppDelta(cr,crP));
-  const ecStages=[{label:'Add to cart',value:c.addToCart},{label:'Checkout',value:c.checkouts},{label:'Purchase',value:c.purchases}];
-  if(chartVariant('ecom_funnel','funnel')==='bars') barsSimple(document.getElementById('ecFunnel'), ecStages);
-  else funnel(document.getElementById('ecFunnel'), ecStages);
-  document.getElementById('ecTable').innerHTML=
-    `<table><thead><tr><th>Stage</th><th class="r">${LBL[P.cur]}</th><th class="r">${LBL[cmp()]}</th><th class="r">Change</th></tr></thead><tbody>
-     <tr><td>Add to cart</td><td class="r">${fnum(c.addToCart)}</td><td class="r muted">${fnum(p.addToCart)}</td><td class="r">${deltaHTML(c.addToCart,p.addToCart)}</td></tr>
-     <tr><td>Checkout</td><td class="r">${fnum(c.checkouts)}</td><td class="r muted">${fnum(p.checkouts)}</td><td class="r">${deltaHTML(c.checkouts,p.checkouts)}</td></tr>
-     <tr><td>Number of sales</td><td class="r">${fnum(c.purchases)}</td><td class="r muted">${fnum(p.purchases)}</td><td class="r">${deltaHTML(c.purchases,p.purchases)}</td></tr>
-     <tr><td>Revenue</td><td class="r">${money(c.revenue)}</td><td class="r muted">${money(p.revenue)}</td><td class="r">${deltaHTML(c.revenue,p.revenue)}</td></tr></tbody></table>`;
-  setSection('ecTable', sectionOn('ecom_detail', true), true);
-  renderAiRevenue();
+}
+function ecDetailHTML(c, p){
+  const row=(label,cv,pv,fmt)=>`<tr><td>${label}</td><td class="r">${fmt(cv)}</td>
+    <td class="r muted">${fmt(pv)}</td><td class="r">${deltaHTML(cv,pv)}</td></tr>`;
+  return `<table><thead><tr><th>Stage</th><th class="r">${LBL[P.cur]}</th>
+    <th class="r">${LBL[cmp()]}</th><th class="r">Change</th></tr></thead><tbody>
+    ${row('Add to cart', c.addToCart, p.addToCart, fnum)}
+    ${row('Checkout', c.checkouts, p.checkouts, fnum)}
+    ${row('Number of sales', c.purchases, p.purchases, fnum)}
+    ${row('Revenue', c.revenue, p.revenue, money)}</tbody></table>`;
+}
+function ecPaneHTML(t, totalRev, active){
+  // "All channels" does not repeat the score row that already sits above the
+  // tabs. The channel name goes in its own span so the language pass matches
+  // "Purchase funnel — " as a whole string.
+  return `<div class="tabpane${active?' on':''}" data-p="${esc(t.id)}">
+    ${t.id==='all' ? '' : `<div class="scoregrid" style="grid-template-columns:repeat(5,1fr);margin-bottom:16px">${ecScoreHTML(t.cur,t.prev,totalRev)}</div>`}
+    <div class="cols">
+      <div><div class="chart-title">Purchase funnel — <span>${esc(t.label)}</span></div><div class="ec-funnel"></div></div>
+      <div><div class="chart-title">Funnel detail</div>${ecDetailHTML(t.cur,t.prev)}</div>
+    </div>
+  </div>`;
+}
+function renderEcom(){
+  const tot=ecTotals(P.cur);
+  document.getElementById('ecScore').innerHTML=ecScoreHTML(tot,cmpBucket(DATA.ecom,tot),0);
+
+  const tabs=ecTabs();
+  document.getElementById('ecTabs').innerHTML=
+    tabs.map((t,i)=>`<button data-t="${esc(t.id)}"${i===0?' class="on"':''}>${esc(t.label)}</button>`).join('');
+  document.getElementById('ecPanes').innerHTML=
+    tabs.map((t,i)=>ecPaneHTML(t, t.id==='all'?0:tot.revenue, i===0)).join('');
+  // Funnels are drawn once the panes exist; % widths render fine while hidden.
+  document.querySelectorAll('#ecPanes .tabpane').forEach((pane,i)=>{
+    const c=tabs[i].cur, host=pane.querySelector('.ec-funnel');
+    const stages=[{label:'Add to cart',value:c.addToCart},{label:'Checkout',value:c.checkouts},
+                  {label:'Purchase',value:c.purchases}];
+    if(chartVariant('ecom_funnel','funnel')==='bars') barsSimple(host,stages); else funnel(host,stages);
+  });
+  wireEcTabs();
+  // The AI assistants have a tab of their own once the sheet splits sales by
+  // channel; the standalone AI-Revenue panel below is for sheets that don't.
+  renderAiRevenue(tabs.some(t=>t.id===EC_AI_CHANNEL));
+}
+// The monetization tabs are rebuilt on every render, so they are wired here
+// rather than by the one-shot wireTabs() pass at start-up.
+function wireEcTabs(){
+  const group=document.getElementById('ecTabs'), panes=document.getElementById('ecPanes');
+  if(!group||!panes) return;
+  group.querySelectorAll('button').forEach(btn=>{ btn.onclick=()=>{
+    group.querySelectorAll('button').forEach(b=>b.classList.remove('on')); btn.classList.add('on');
+    panes.querySelectorAll('.tabpane').forEach(pn=>pn.classList.toggle('on', pn.dataset.p===btn.dataset.t));};});
 }
 // AI-driven sales: purchases/revenue attributed to AI assistants. Hidden when
-// the client sheet has no AI-ecommerce data (all zeros / tab absent).
-function renderAiRevenue(){
+// the client sheet has no AI-ecommerce data (all zeros / tab absent), and when
+// the same sales already have a channel tab of their own.
+function renderAiRevenue(hasOwnTab){
   const wrap=document.getElementById('aiRevenueWrap'); if(!wrap) return;
+  if(hasOwnTab){ wrap.style.display='none'; return; }
   const ai=(DATA.aiEcom&&DATA.aiEcom[P.cur])||null, aip=(DATA.aiEcom&&DATA.aiEcom[cmp()])||{purchases:0,revenue:0,addToCart:0,checkouts:0};
   const site=DATA.ecom[P.cur]||{revenue:0,purchases:0};
   const hasData=ai && (ai.purchases||ai.revenue||ai.addToCart||ai.checkouts);
@@ -1235,20 +1320,30 @@ function wireTaskControls(host, blockKey){
 // and Planned works read as a matching pair rather than a table followed by a
 // plan. No description and no tracked time: this section reports what was done,
 // not how long it took.
+function taskLinkChip(id){
+  return id ? '<span class="chip id">task link <a href="https://app.clickup.com/t/'+
+    esc(id)+'" target="_blank" rel="noopener">#'+esc(id)+'</a></span>' : '';
+}
+// The newest ClickUp comment, printed verbatim — whoever worked the task wrote
+// what was done there, and rewording it would only lose detail. Escaped and
+// wrapped in pre-wrap so its own line breaks survive and its text cannot inject
+// markup into the report.
+function taskComment(text){
+  const t=String(text||'').trim();
+  return t ? '<div class="pi-desc">'+esc(t)+'</div>' : '';
+}
 function doneItem(r, i){
-  // r: [task, task_id]
+  // r: [task, task_id, last_comment]
   const name=String(r[0]||'').trim()||('Task '+(i+1));
   const id=String(r[1]||'');
-  const chips = id
-    ? '<div class="pi-meta"><span class="chip id"><a href="https://app.clickup.com/t/'+
-      esc(id)+'" target="_blank" rel="noopener">#'+esc(id)+'</a></span></div>'
-    : '';
+  const chip=taskLinkChip(id);
   const rm = DATA.editable && id
     ? '<button class="tr-rm" data-task="'+esc(id)+
       '" title="Remove this task from the report">&times;</button>'
     : '';
   return '<li'+(rm?' class="has-rm"':'')+'><div class="pi-body">'+
-    '<div class="pi-name">'+esc(name)+'</div>'+chips+'</div>'+rm+'</li>';
+    '<div class="pi-name">'+esc(name)+'</div>'+taskComment(r[2])+
+    (chip?'<div class="pi-meta">'+chip+'</div>':'')+'</div>'+rm+'</li>';
 }
 function taskTable(id, rows, blockKey){
   const rm = !!(DATA.editable && blockKey);
@@ -1275,20 +1370,18 @@ function planDate(iso){
   return mo ? (Number(m[3])+' '+mo+' '+m[1]) : String(iso);
 }
 // One planned task as a card: the same shape as doneItem(), plus the due date.
-// No assignee and no ClickUp description — the client reads what is planned,
-// not who on the team owns it or what the internal ticket says.
+// No assignee — the client reads what is planned, not who on the team owns it.
 function planItem(t, i){
   const name=t.name||('Task '+(i+1));
   const chips=[];
   if(t.due) chips.push('<span class="chip due">Due '+esc(planDate(t.due))+'</span>');
-  if(t.taskId) chips.push('<span class="chip id"><a href="https://app.clickup.com/t/'+
-    esc(t.taskId)+'" target="_blank" rel="noopener">#'+esc(t.taskId)+'</a></span>');
+  if(t.taskId) chips.push(taskLinkChip(t.taskId));
   const rm = DATA.editable && t.taskId
     ? '<button class="tr-rm" data-task="'+esc(t.taskId)+
       '" title="Remove this task from the report">&times;</button>'
     : '';
   return '<li'+(rm?' class="has-rm"':'')+'><div class="pi-body">'+
-    '<div class="pi-name">'+esc(name)+'</div>'+
+    '<div class="pi-name">'+esc(name)+'</div>'+taskComment(t.comment)+
     (chips.length?'<div class="pi-meta">'+chips.join('')+'</div>':'')+
     '</div>'+rm+'</li>';
 }
