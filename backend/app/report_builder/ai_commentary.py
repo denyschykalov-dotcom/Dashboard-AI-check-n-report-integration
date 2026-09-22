@@ -126,7 +126,8 @@ _DEFAULT_COMMENT_PROMPT = (
     "Per comment: exactly two paragraphs, 550-650 characters, no markdown, no "
     "headings. Paragraph 1 explains what the section shows; paragraph 2 starts "
     "with the word CHANGES. and gives the MoM/YoY movement. Never invent a "
-    "figure."
+    "figure. Never report time spent on work — no hours, days or man-hours, for "
+    "a task or for a section."
 )
 
 _DEFAULT_SEARCH_INDUSTRY_PROMPT = (
@@ -272,7 +273,12 @@ def build_report_context(
     # the context the model wrote about it anyway, most visibly by noting there
     # was "no data for the previous year" on a report with year-on-year switched
     # off. Drop what the report does not show, so it cannot be commented on.
-    drop_keys: set[str] = set()
+    # ClickUp's raw tracked time rides along in the work sections but is shown
+    # nowhere in the report. Left in the context the model did the division and
+    # wrote "x hours spent on y" — a figure the client cannot check against
+    # anything on the page. The suffix rule below also takes
+    # ``total_time_spent_ms``.
+    drop_keys: set[str] = {"time_spent_ms"}
     if "yoy" not in offered:
         drop_keys |= {"yoy", "yoy_period"}
     if "mom" not in offered:

@@ -266,6 +266,24 @@ class ReportContextTests(unittest.TestCase):
         self.assertEqual(context["reporting_period"], "Jun 2026")
         self.assertEqual(context["comparisons_offered"], ["MOM", "YOY"])
 
+    def test_tracked_time_never_reaches_the_model(self):
+        """Claude turned ClickUp's milliseconds into "hours spent on the task",
+        a figure the report shows nowhere. With no number it cannot."""
+        context = self._context(
+            blocks=[{
+                "block_type_key": "work_completed",
+                "status": "ok",
+                "data": {
+                    "total_time_spent_ms": 7200000,
+                    "tasks": [{"name": "Guest post writing", "time_spent_ms": 3600000}],
+                },
+            }]
+        )
+        data = context["sections"][0]["data"]
+        self.assertNotIn("total_time_spent_ms", data)
+        self.assertNotIn("time_spent_ms", data["tasks"][0])
+        self.assertEqual(data["tasks"][0]["name"], "Guest post writing")
+
     def test_long_lists_are_sampled_with_a_marker_and_floats_rounded(self):
         context = self._context(
             blocks=[{
@@ -411,11 +429,11 @@ class PlannedWorksPayloadTests(unittest.TestCase):
             client_domain="acme.com",
         )
 
-    def test_clickup_todo_tasks_carry_the_due_date_and_last_comment(self):
-        """Planned works mirrors Work completed: no assignee, no description.
+    def test_clickup_todo_tasks_carry_only_the_due_date(self):
+        """Planned works keeps the name, the due date and the task link.
 
-        Both are internal ClickUp detail the client's report doesn't carry. The
-        newest comment is carried, because that is where the plan is written.
+        No assignee, no description and no last comment: all three are internal
+        ClickUp detail, and a task not started yet has nothing done to report.
         """
         data = self._data({
             "block_type_key": "planned_works",
@@ -433,7 +451,6 @@ class PlannedWorksPayloadTests(unittest.TestCase):
             "name": "Rewrite service pages",
             "taskId": "abc123",
             "due": "2026-08-12",
-            "comment": "Waiting on the copy deck.",
         }])
 
     def test_a_manual_plan_still_renders_as_prose(self):

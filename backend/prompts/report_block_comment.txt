@@ -43,6 +43,10 @@ Rules:
 - Use only the numbers in the data. Never invent, estimate, or round
   misleadingly.
 - Be honest: report declines plainly, don't spin them.
+- Never report time spent on work. Do not state, sum, estimate or convert hours,
+  days or man-hours for any task or for a section as a whole. The client report
+  shows no time figures, so a comment about hours spent is a number the reader
+  cannot check against anything on the page.
 - If a section's status is not "ok" (placeholder, unavailable, expired
   subscription), say so in one clause rather than inflating thin data.
 
