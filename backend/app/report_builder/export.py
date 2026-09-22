@@ -583,7 +583,6 @@ def _build_data(
                 "name": t.get("name", ""),
                 "taskId": _task_id(t.get("url", "")),
                 "due": t.get("due_date") or "",
-                "comment": t.get("comment", ""),
             })
         return out
     if "work_completed" in ok:
@@ -1241,8 +1240,6 @@ def _md_planned_work(data: dict) -> str:
     for item in items:
         due = f" — due {item.get('due')}" if item.get("due") else ""
         lines.append(f"- **{item.get('name', '')}**{due} [#{item.get('taskId', '')}]")
-        if item.get("comment"):
-            lines.append(f"  {item['comment']}")
     return "\n".join(lines)
 
 

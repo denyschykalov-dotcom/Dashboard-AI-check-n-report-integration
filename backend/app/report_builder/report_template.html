@@ -1370,7 +1370,8 @@ function planDate(iso){
   return mo ? (Number(m[3])+' '+mo+' '+m[1]) : String(iso);
 }
 // One planned task as a card: the same shape as doneItem(), plus the due date.
-// No assignee — the client reads what is planned, not who on the team owns it.
+// No assignee and no ClickUp comment — the client reads what is planned, not who
+// on the team owns it or what the internal ticket thread says.
 function planItem(t, i){
   const name=t.name||('Task '+(i+1));
   const chips=[];
@@ -1381,7 +1382,7 @@ function planItem(t, i){
       '" title="Remove this task from the report">&times;</button>'
     : '';
   return '<li'+(rm?' class="has-rm"':'')+'><div class="pi-body">'+
-    '<div class="pi-name">'+esc(name)+'</div>'+taskComment(t.comment)+
+    '<div class="pi-name">'+esc(name)+'</div>'+
     (chips.length?'<div class="pi-meta">'+chips.join('')+'</div>':'')+
     '</div>'+rm+'</li>';
 }

@@ -304,18 +304,13 @@ def _done_tasks(
     return items
 
 
-def _todo_tasks(
-    context: ResolveContext, token: str, tasks: list[dict]
-) -> list[dict[str, object]]:
-    """Tasks in the "Todo" status — plans carried into the next period."""
-    items = []
-    for task in tasks:
-        if _status_name(task) != _TODO_STATUS_NAME:
-            continue
-        summary = _task_summary(task)
-        summary["comment"] = _last_comment(context, token, str(task.get("id") or ""))
-        items.append(summary)
-    return items
+def _todo_tasks(tasks: list[dict]) -> list[dict[str, object]]:
+    """Tasks in the "Todo" status — plans carried into the next period.
+
+    No last comment here, unlike Work completed: a task not started yet has
+    nothing done to report, and its ClickUp thread is internal.
+    """
+    return [_task_summary(task) for task in tasks if _status_name(task) == _TODO_STATUS_NAME]
 
 
 def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
@@ -356,7 +351,7 @@ def resolve(block: BlockType, context: ResolveContext) -> BlockResult:
             "tasks": items,
         })
     if block.key == "planned_works":
-        items = _todo_tasks(context, str(data["token"]), tasks)
+        items = _todo_tasks(tasks)
         log_event(
             logger,
             "clickup_block",
